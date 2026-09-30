@@ -1,0 +1,6 @@
+# Cold dependencies (no GPU). The afh harness is installed separately, pinned, from GitHub:
+#     bash scripts/install_afh.sh
+# GPU runners need the NVlabs inference environment of the model they probe (see each
+# runner's docstring); nothing from those repos is vendored here.
+numpy>=1.24
+pytest>=7.0

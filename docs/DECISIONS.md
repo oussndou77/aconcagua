@@ -31,3 +31,13 @@ One entry per design decision: what was decided, why, what was rejected. Append-
 ## D-007 · 2026-09-30 · Training targets: text and action never contradict
 **Decision.** Inherited from the uncertainty pipeline (PRs #2–#4): the text announces a stop exactly when the trajectory stops; a slowed trajectory is described as slowing; a black front camera is never described as "clearly visible".
 **Why.** The harness audits what the model says against what it does; training data must pass the same check, or we teach the defect we audit for.
+
+## D-008 · 2026-09-30 · Alpamayo 2 Super CoC training target is tagged with special tokens (resolved)
+**Decision.** The stage-1 target for 2 Super is `<|cot_start|>cot<|cot_end|><|meta_action_start|>…<|meta_action_end|><|traj_future_start|>…`; the per-component label mask of the 1.5 recipe applies unchanged.
+**Why.** In `NVlabs/alpamayo2`, `SPECIAL_TOKENS_KEYS` (`models/utils.py`) contains `cot_start`/`cot_end` and `meta_action_start`/`meta_action_end`, added to the tokenizer by `config.py`; `helper.create_messages` asks for `components_prompt=["cot", "traj_future"]` and `get_component_str` emits only the opening token of a requested component, so a prompt ending in `<|cot_start|>` makes the model generate `cot <|cot_end|> <|meta_action_start|>…<|meta_action_end|> <|traj_future_start|>…`. Note for the record: the release's `create_messages` passes `components_order=["image", "traj_history", "prompt"]`, so its inference prompt drops the empty assistant turn; the tagged form is what `build_conversation` produces in training mode with `cot` in `components_order`.
+**Rejected.** An untagged "assistant span" target, which would have required a different label mask and left the meta-action block unmarked.
+
+## D-010 · 2026-09-30 · `afh` reasons in camera identifiers, not tensor positions (adopted)
+**Decision.** Degradations, target severities and target texts are keyed by the loader's `camera_indices`; a tensor position is never taken for a camera. Fix in alpamayo-faithfulness PR #7 (`afh/cameras.py`, `apply_degradation(..., camera_indices=)`), `camera_indices` required for manifests in PR #8.
+**Why.** The 1.5 loader returns 4 cameras `[0, 1, 2, 6]` and the 2 Super task profiles 6 cameras `[0, 1, 2, 3, 5, 6]`; with the former position convention, position 3 of the 1.5 tensor (front telephoto) was named "rear-left" and missed the front-camera floors, which is exactly the "black front camera described as visible" defect D-007 forbids.
+**Rejected.** Remapping in each runner (duplicated logic, silent when forgotten).

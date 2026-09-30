@@ -36,11 +36,10 @@ Design notes:
   * K INDEPENDENT rollouts (one seed each, num_traj_samples=1), never one call with
     num_traj_samples=K: a multi-sample call shares one Chain-of-Causation across the K
     trajectories (same lesson as runners/run_inference.py in the harness).
-  * The 1.5 loader returns 4 cameras with camera ids [0, 1, 2, 6]; afh.degradation works on
-    TENSOR indices, so `spec.cameras` are [0, 1, 2, 3] and the payload records the id
-    mapping under "camera_indices". For a total blackout this changes nothing physically,
-    but afh's camera names / front-camera floors assume the 7-camera order (see the design
-    note, proposed D-010).
+  * The 1.5 loader returns 4 cameras with camera ids [0, 1, 2, 6]; `spec.cameras` are tensor
+    positions ([0, 1, 2, 3]) and the loader's `camera_indices` is handed to afh (D-010,
+    afh.cameras) so that camera names and front-camera floors follow camera ids, not
+    positions. The payload records both.
   * `--attn sdpa` is the default: the 1.5 README documents it as the flash-attn-free path,
     and the diffusion expert is forced to sdpa anyway. Pass `--attn flash_attention_2` on a
     pod where flash-attn is built.
@@ -101,19 +100,24 @@ def blackout_spec(n_cam: int, seed: int = 0) -> DegradationSpec:
     return DegradationSpec(family="blackout", severity=1.0, cameras=list(range(n_cam)), seed=seed)
 
 
-def blackout_frames(frames: np.ndarray, seed: int = 0) -> tuple[np.ndarray, DegradationSpec]:
+def blackout_frames(frames: np.ndarray, camera_indices: Iterable[int] | None = None,
+                    seed: int = 0) -> tuple[np.ndarray, DegradationSpec]:
     """
     Black out every camera of `frames` (n_cam, n_t, 3, H, W) uint8 through afh.degradation.
 
-    Returns the degraded frames and the resolved spec (cameras and params filled). The
-    result is asserted to be all-zero: the probe must never run on a partially black input.
+    `camera_indices` is the loader's data["camera_indices"] (tensor position -> camera id,
+    D-010); afh stores it in the spec so target_text / target_severity name the right
+    cameras. Returns the degraded frames and the resolved spec (cameras and params filled).
+    The result is asserted to be all-zero: the probe must never run on a partially black
+    input.
     """
     frames = np.asarray(frames)
     if frames.dtype != np.uint8:
         raise TypeError(f"frames must be uint8 (loader output), got {frames.dtype}")
     if frames.ndim != 5:
         raise ValueError(f"frames must be (n_cam, n_t, 3, H, W), got shape {frames.shape}")
-    degraded, spec = apply_degradation(frames, blackout_spec(frames.shape[0], seed=seed))
+    degraded, spec = apply_degradation(frames, blackout_spec(frames.shape[0], seed=seed),
+                                       camera_indices=camera_indices)
     if degraded.any():
         raise AssertionError("blackout left non-zero pixels; refusing to run a partial blackout")
     return degraded, spec
@@ -326,10 +330,10 @@ def main(argv: list[str] | None = None) -> dict:
     print(f"[cams] tensor order = {camera_indices} -> "
           f"{[CAMERA_ID_TO_NAME.get(c, '?') for c in camera_indices]}; frames {tuple(frames.shape)} {frames.dtype}")
 
-    degraded_np, spec = blackout_frames(frames.cpu().numpy())
+    degraded_np, spec = blackout_frames(frames.cpu().numpy(), camera_indices=camera_indices)
     black = torch.from_numpy(degraded_np)
-    ts = target_severity(spec)
-    expected_text = target_text(spec)
+    ts = target_severity(spec, camera_indices=camera_indices)
+    expected_text = target_text(spec, camera_indices=camera_indices)
     print(f"[blackout] spec={spec.to_dict()}")
     print(f"[blackout] afh target severity {ts:.2f}; expected wording: {expected_text!r}")
 

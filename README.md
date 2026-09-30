@@ -23,8 +23,9 @@ bash scripts/install_afh.sh        # afh harness from github.com/oussndou77/alpa
 python -m pytest tests
 ```
 
-The harness is a dependency, never copied. Its fixtures (used by the tests as the reference
-layout) come from the pinned checkout the script leaves under `.deps/`.
+The harness is a pip dependency installed from GitHub at a pinned commit, never copied. Its
+fixtures (the reference layout the tests compare against) come from the pinned checkout the
+script leaves under `.deps/`, which is used for nothing else.
 
 ## GPU runners
 

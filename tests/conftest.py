@@ -1,13 +1,12 @@
 """
-Test bootstrap: make the repo root importable and locate the afh harness.
+Test bootstrap: make the repo root importable and locate the harness fixtures.
 
-`afh` is a dependency installed from GitHub (scripts/install_afh.sh). When the wheel build is
-not possible (upstream pyproject without package discovery, see the script), the pinned
-checkout under .deps/alpamayo-faithfulness is put on sys.path instead. Its fixtures are
-exposed to the tests through `afh_fixture_dir` (None when the checkout is absent).
+`afh` itself is a pip dependency installed from GitHub (scripts/install_afh.sh). The
+fixtures the tests compare against are not in the wheel; they are read from the pinned
+checkout the same script leaves under .deps/alpamayo-faithfulness (override with AFH_REPO).
+`afh_fixture_dir` is None when that checkout is absent and the fixture tests skip.
 """
 
-import importlib.util
 import os
 import sys
 
@@ -18,8 +17,6 @@ AFH_CHECKOUT = os.environ.get("AFH_REPO", os.path.join(ROOT, ".deps", "alpamayo-
 
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-if importlib.util.find_spec("afh") is None and os.path.isdir(os.path.join(AFH_CHECKOUT, "afh")):
-    sys.path.insert(0, AFH_CHECKOUT)
 
 
 @pytest.fixture(scope="session")

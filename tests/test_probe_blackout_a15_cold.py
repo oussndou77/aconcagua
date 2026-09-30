@@ -63,6 +63,10 @@ def test_blackout_frames_all_black_via_afh():
     assert spec.family == "blackout" and spec.severity == 1.0
     assert spec.cameras == [0, 1, 2, 3]
     assert spec.params == {"n_cameras": 4, "n_cam_total": 4}
+    # with the loader's camera ids (D-010) the spec carries them for target_text/severity
+    _, spec_ids = probe.blackout_frames(frames, camera_indices=[0, 1, 2, 6])
+    assert spec_ids.cameras == [0, 1, 2, 3]
+    assert spec_ids.params == {"n_cameras": 4, "n_cam_total": 4, "camera_indices": [0, 1, 2, 6]}
 
 
 def test_blackout_target_is_the_stop_policy():
@@ -75,6 +79,16 @@ def test_blackout_target_is_the_stop_policy():
     # the 7-camera (A2) case gives the same target: the probe is loader-agnostic here
     _, spec7 = probe.blackout_frames(_frames(n_cam=7))
     assert target_severity(spec7) >= STOP_SEVERITY and spec7.cameras == list(range(7))
+    # 1.5 loader ids [0, 1, 2, 6]: "all cameras" wording, stop policy, no mislabelled camera
+    _, spec4 = probe.blackout_frames(_frames(n_cam=4), camera_indices=[0, 1, 2, 6])
+    text4 = target_text(spec4, camera_indices=[0, 1, 2, 6])
+    assert text4.startswith("All cameras are returning no image")
+    assert target_severity(spec4, camera_indices=[0, 1, 2, 6]) >= STOP_SEVERITY
+    # a single black position 3 of that loader is the front telephoto camera, not rear-left
+    from afh.degradation import DegradationSpec, apply_degradation
+    one = DegradationSpec(family="blackout", severity=0.2, cameras=[3], seed=0)
+    _, one = apply_degradation(_frames(n_cam=4), one, camera_indices=[0, 1, 2, 6])
+    assert target_text(one).startswith("Front telephoto camera") and "rear" not in target_text(one)
 
 
 def test_blackout_is_deterministic_and_serialisable():

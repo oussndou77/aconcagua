@@ -1,0 +1,10 @@
+# pinned checkouts of dependencies (scripts/install_afh.sh)
+.deps/
+# runner outputs
+outputs/
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/

@@ -286,6 +286,8 @@ Jetons de raisonnement :
 
 Chaque étape produit un artefact vérifiable seul (principe 1 de la roadmap). Les étapes 0 à 2 sont à froid ou sur un pod d'inférence ; 3 à 6 demandent 4×H100.
 
+> **2026-10-11 :** NVIDIA a publié la recette `alpamayo-recipes/recipes/alpamayo2_sft` (#39). D-014 (proposée) la prend comme base : les étapes 2 à 4 ci-dessous sont couvertes par son processeur, son collate et ses deux `forward`, sauf LoRA et la supervision du CoC. Revue : `docs/recipe_a2_sft_review.md`.
+
 ### Étape 0 — Configuration (faite) et premières observations sur le pod (1 h)
 
 Les configs sont dans `docs/configs/` (inconnues 2, 3, 7 levées) et le format de cible CoC est posé en hypothèse de travail par D-008. Reste sur le pod, et c'est ce qui lève l'inconnue 1 : un rollout avec `return_extra=True` pour archiver `extra["raw_outputs"][0]` et voir si le premier jeton généré est `<|cot_start|>` ou du texte libre suivi de `<|traj_future_start|>` (sinon D-011) et une sortie `meta_action` pour le vocabulaire `Longitudinal/Lateral/Lane` (inconnue 4).
@@ -334,22 +336,23 @@ Structure `recipes/alpamayo2_super_sft/` calquée sur `alpamayo1_5_sft` (README,
 ---
 
 ## 4. Inconnues qui ne se lèveront que sur GPU (ou avec l'accès HF)
-Douze inconnues au départ ; état au 2026-09-30, après l'ajout des configs (`docs/configs/`, commit `804fd42`) et D-008/D-010.
 
-| # | Inconnue | État | Source de la levée / ce qui reste |
-|---|---|---|---|
-| 1 | Jetons du CoC à l'entraînement de 2S (avec ou sans `<|cot_start|>`) | **GPU** (D-008 = hypothèse de travail) | le modèle livré émet-il `<|cot_start|>` en premier jeton, ou du texte libre puis `<|traj_future_start|>` ? Un rollout avec `raw_outputs` tranche. Les jetons existent (`models/utils.py`, `config.py`) et `build_conversation` les pose en mode entraînement ; si le modèle ne les émet pas, D-011 choisit entre cibles sans balises et inférence en prompt d'entraînement |
-| 2 | `config.json` de 2S | **Levée** | `docs/configs/alpamayo2-super/config.json` : `Qwen3VLForConditionalGeneration`, LM 64 × 5120 (64 têtes / 8 KV), vision 27 couches deepstack `[8,16,24]`, expert 64 × 1536, vocabulaire 155 776, `loss_weights` égaux, `enable_expert: true`, `cotrain_expert_vlm: false`, pas de `logit_cap`, futur 128 = 64 × (a, κ) 3 000 bins `id0 152669`, histoire 45 = 15 × 3 1 000 bins `id0 151669` (`pad_origin_at_beginning: false`) |
-| 3 | `config.json` de 1.5 | **Levée** | `docs/configs/alpamayo-1.5-10b/config.json` : `traj_vocab_size 4000`, `traj_token_start_idx 151669`, futur d'abord puis histoire, 48 / 128 jetons, `add_special_tokens: true`, `attn_implementation flash_attention_2`, expert 2048 / 8256 / 16 têtes |
-| 4 | Vocabulaire des méta-actions (`Longitudinal/Lateral/Lane`) et fréquence sans prompt dédié | **GPU** | une génération `meta_action` sur le pod ; le code n'énumère pas les valeurs |
-| 5 | `Alpamayo2Super.forward` / `ExpertModel.forward` avec gradients sous `transformers 4.57.x` (`DynamicCache.crop` après un `forward`, `rope_deltas`, masque 4D avec `sdpa`, `is_causal=False`) | **GPU** | smoke test de l'étape 3 ; note : le checkpoint 2S a été sauvé avec `transformers 4.57.6`, la recette épingle 4.57.1 |
-| 6 | Empreinte mémoire et débit de l'étape 3 (activations ~5 k jetons, cache KV 6 caméras) | **GPU** | décide FSDP bf16 vs base 8 bits (D-009, proposée) |
-| 7 | Noms des modules PEFT | **Levée** | `vlm_config.architectures = ["Qwen3VLForConditionalGeneration"]` : LM `q_proj/k_proj/v_proj/o_proj` + `gate_proj/up_proj/down_proj` sous `language_model`, à exclure l'encodeur visuel dont les projections portent d'autres noms |
-| 8 | Longueur de séquence par profil et taille des `pixel_values` | **GPU** (estimable) | `preprocessor_config.json` donne `patch_size 16`, `merge_size 2`, `min/max_pixels` ; ≈ 192 jetons par image, à mesurer sur un lot réel |
-| 9 | flash-attn sur le pod | **GPU** | compilation à l'installation ; repli `sdpa` |
-| 10 | `traj_to_action` sur les trajectoires amorties jusqu'à l'arrêt | **GPU** (ou CPU avec `alpamayo2_super` installé) | seuil `_LOW_SPEED_CURVATURE_THRESHOLD_MPS = 0.6` |
-| 11 | Reproductibilité des rollouts avec le prefill partagé (graines) | **GPU** | deux rollouts à graine fixe sur le pod |
-| 12 | Licence de redistribution des poids dérivés | **Ousseynou** | fiche modèle HF (`OpenMDW-1.1` d'après les README) ; risque n° 2 de la roadmap, à trancher avant tout partage de checkpoint |
+Douze inconnues au départ. État au 2026-10-11, après les configs (`docs/configs/`, commit `804fd42`), D-008/D-010, et la recette officielle `alpamayo-recipes` #39 (`recipes/alpamayo2_sft/`, abrégé `R/`) avec `alpamayo2` #18. Détail et références dans `docs/recipe_a2_sft_review.md`. La colonne « Recette » dit ce que la recette lève ; la séance qui traite le reste est `docs/gpu_session_01.md`.
+
+| # | Inconnue | État | Recette #39 / #18 | Source de la levée / ce qui reste |
+|---|---|---|---|---|
+| 1 | Jetons du CoC à l'entraînement de 2S (avec ou sans `<|cot_start|>`) | **GPU** (D-008 = hypothèse de travail) | **Non levée.** La recette n'entraîne pas le CoC (`R/configs/preprocess/trajectory.yaml:2-4`, `R/README.md:340`). Son template le baliserait si `cot` était ajouté (`conversation.py:390-393` → `construct_cot`). Son masque couvre toute la réponse de l'assistant (`R/processor.py:147-158`). Les tests de #18 modélisent une génération **non balisée** (`tests/test_text_extraction.py:170-181`) | bloc 1 : premiers jetons générés par la release sur `0ea6fd88` ; bloc 2 : jetons de la réponse assistant dans le chemin d'entraînement officiel avec `cot`. Si les deux divergent, D-011 |
+| 2 | `config.json` de 2S | **Levée** | — | `docs/configs/alpamayo2-super/config.json` : `Qwen3VLForConditionalGeneration`, LM 64 × 5120 (64 têtes / 8 KV), vision 27 couches deepstack `[8,16,24]`, expert 64 × 1536, vocabulaire 155 776, `loss_weights` égaux, `enable_expert: true`, `cotrain_expert_vlm: false`, pas de `logit_cap`, futur 128 = 64 × (a, κ) 3 000 bins `id0 152669`, histoire 45 = 15 × 3 1 000 bins `id0 151669` (`pad_origin_at_beginning: false`) |
+| 3 | `config.json` de 1.5 | **Levée** | — | `docs/configs/alpamayo-1.5-10b/config.json` : `traj_vocab_size 4000`, `traj_token_start_idx 151669`, futur d'abord puis histoire, 48 / 128 jetons, `add_special_tokens: true`, `attn_implementation flash_attention_2`, expert 2048 / 8256 / 16 têtes |
+| 4 | Vocabulaire des méta-actions (`Longitudinal/Lateral/Lane`) et fréquence sans prompt dédié | **GPU** | **Non levée.** Méta-actions non supervisées par la recette. #18 ne donne que des valeurs d'exemple dans ses tests (`brake`, `straight`, `keep`, `tests/test_text_extraction.py:171`) | bloc 1 : tâche trajectoire et tâche `meta_action` de la release |
+| 5 | Forward avec gradients sous `transformers 4.57.x` (`DynamicCache.crop` après un `forward`, `rope_deltas`, masque 4D, `is_causal=False`) | **Levée pour le plein fine-tuning** ; GPU pour notre variante | **Levée par la recette** : `TrainableAlpamayo2Super.forward` (`R/models/trainable_alpamayo2_super.py:150-186`) et `_forward_expert` (`:188-242`, `crop` `:221`), smoke publié sur 8 H100 (`R/README.md:318-324`), transformers 4.57.1 (`R/uv.lock`) | reste : gradients partiels (LoRA, ou `q_proj` seuls) sur un GPU — bloc 2 |
+| 6 | Empreinte mémoire et débit de l'étape 1 | **GPU** | **Partiellement levée** : plein fine-tuning = 4 × 8 H100, ZeRO-3, grad-ckpt (`R/README.md:46`, `R/configs/sft_base.yaml:84-87`) ; smoke 1 nœud = 1 caméra, 1 image, optimiseur sur CPU (`R/configs/sft_stage1_single_node_debug.yaml:5-7`, `:23`). Rien sur LoRA ni sur un GPU seul | bloc 2 : `max_memory_allocated` sur un GPU, gradients sur `q_proj` des 4 dernières couches, repli caméras puis images ; décide D-009 |
+| 7 | Noms des modules PEFT | **Levée** | — (pas de PEFT dans la recette) | `vlm_config.architectures = ["Qwen3VLForConditionalGeneration"]` : LM `q_proj/k_proj/v_proj/o_proj` + `gate_proj/up_proj/down_proj` sous `language_model`, à exclure l'encodeur visuel dont les projections portent d'autres noms |
+| 8 | Longueur de séquence par profil et taille des `pixel_values` | **GPU** (borne connue) | **Borne donnée** : la recette padde à 6 144 jetons fixes pour 7 caméras × 4 images (`R/configs/sft_base.yaml:46-47`) et lève une erreur au-delà (`R/processor.py:127-131`) | bloc 2 : longueur exacte et part des jetons visuels |
+| 9 | flash-attn sur le pod | **GPU** | **Partiellement** : la recette installe `flash-attn 2.8.3.post1` (`R/uv.lock`) mais ne sélectionne aucune `attn_implementation` (défaut `transformers`) | bloc 0 : compilation ; repli `--no-install-package flash-attn` |
+| 10 | `traj_to_action` sur les trajectoires amorties jusqu'à l'arrêt | **GPU** (ou CPU avec `alpamayo2_super` installé) | **Non levée** (cibles de la recette = trajectoires vraies) | seuil `_LOW_SPEED_CURVATURE_THRESHOLD_MPS = 0.6` |
+| 11 | Reproductibilité des rollouts avec le prefill partagé (graines) | **GPU** | **Non levée** (l'évaluation tire 6 échantillons par groupes de 2, `R/evaluate_hf.py:111-127`, sans test de reproductibilité) | bloc 1 avec `--n-samples 2` à graine fixe |
+| 12 | Licence de redistribution des poids dérivés et usage du dataset | **Ousseynou** | **Non levée** : la recette renvoie aux licences sans les discuter (`README.md:216`, `:297` ; `R/README.md:349`) | fiche modèle et licence du dataset sur HF ; risque n° 2 de la roadmap |
 
 ## 5. Ce que cette note décide et ce qu'elle laisse à Ousseynou
 Décidé ici (dans le périmètre de D-004) : LoRA sur le LM du VLM d'abord, expert ensuite, cibles générées par `afh`, réutilisation des forward d'entraînement de la release 2S, aucun code NVlabs copié (dépendances git). Dans `DECISIONS.md` :
@@ -357,4 +360,5 @@ Décidé ici (dans le périmètre de D-004) : LoRA sur le LM du VLM d'abord, exp
 - **D-008 (hypothèse de travail, en attente du GPU)** : cible CoC de 2S balisée `<|cot_start|>…<|cot_end|><|meta_action_start|>…<|meta_action_end|><|traj_future_start|>…`, le format que `build_conversation` produit en mode entraînement ; l'étape 2 s'écrit sur cette base, l'inconnue 1 la confirme ou ouvre D-011.
 - **D-010 (adoptée)** : `afh` raisonne en identifiants caméra (`afh/cameras.py`, alpamayo-faithfulness PR #7) ; `runners/probe_blackout_a15.py` passe `camera_indices` au harnais.
 - **D-009 (proposée)** : FSDP bf16 vs base quantifiée pour l'étape 3 — attendre l'inconnue 6.
+- **D-014 (proposée)** : adopter la recette officielle `alpamayo2_sft` comme base W1 ; réexamine D-003 et D-004 et liste les contradictions avec la roadmap, sans les trancher.
 

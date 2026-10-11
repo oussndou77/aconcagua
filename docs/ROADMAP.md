@@ -40,8 +40,8 @@ Rented cluster (4–8×H100), 500 GB–1 TB volume, experiment tracking (MLflow 
 **Done when:** a smoke training runs on 4 GPUs and resumes after interruption.
 
 ### W1 — Alpamayo 2 Super training recipe
-No official recipe exists (verified 2026-09-30: `alpamayo-recipes` holds 1 / 1.5 SFT, 1.x RL, 1.5 quant only; `alpamayo2` has no training code). Port `recipes/alpamayo1_5_sft` (stage 1 VLM cross-entropy, stage 2 diffusion flow matching) to Cosmos 3 backbone, 7 cameras, meta-actions. **LoRA first.**
-Deliverables: design note (exhaustive 1.5 vs 2 diff), data adapter, training script, 10-example smoke test, PR upstream.
+An official recipe exists since 2026-09-30: `alpamayo-recipes/recipes/alpamayo2_sft` (#39). It trains the **trajectory only** (no CoC, no meta-actions), in **full fine-tuning on 32 H100** for stage 1 (16+ for stage 2), with no LoRA/PEFT. Review: `docs/recipe_a2_sft_review.md`. D-014 (proposed) decides between building on it and keeping the 1.5-first path (D-003), on the result of GPU session 01 block 2. **LoRA first** (D-004): PEFT on `TrainableAlpamayo2Super` is a W1 deliverable.
+Deliverables: design note (exhaustive 1.5 vs 2 diff), recipe review, PEFT option on `TrainableAlpamayo2Super`, data adapter (afh manifests → recipe dataset, with CoC targets), 10-example smoke test, PR upstream.
 **Done when:** a clean-input fine-tune reproduces base behaviour with no regression.
 
 ### W2 — Data
@@ -52,7 +52,8 @@ Deliverables: costed inventory (hours, licence, conversion effort), converters.
 **Done when:** 10,000 labelled examples outside the NVIDIA dataset, in training format.
 
 ### W3 — Capability 1: uncertainty under degradation
-Pipeline ready. Train on Alpamayo 1.5 first (existing recipe, 3× smaller; blackout test first to confirm the defect), then on 2 Super once W1 works.
+Pipeline ready. Train on Alpamayo 1.5 first (existing recipe, 3× smaller; blackout test first to confirm the defect), then on 2 Super once W1 works — order revisited by D-014.
+The official recipe's minADE (0.8288 m on held-out chunk 99) is measured without generated CoC and is **not comparable** to our measurements: the W3 baseline is the base model measured with `afh` (CoC + trajectory, same clips, same controls).
 Deliverables: before/after video, two-axis evaluation report, results on issue #9.
 **Done when:** calibration AUROC clearly above base, zero clean-input regression, generalisation to held-out families and compounds.
 
@@ -86,7 +87,7 @@ Harness extensions, upstream PRs, issue #9 updates, challenge submissions, works
 **Calendar constraint (2026-09-30):** the AlpaSim Closed-Loop Challenge 2026 froze rules on 2026-09-15, closes its public leaderboard on 2026-10-31, releases results 2026-11-15 (NeurIPS 2026 workshop). A trained derivative cannot make it; the 2026 editions are for learning the submission workflow, the 2027 editions are the target.
 
 ## 6. Budget (orders of magnitude)
-LoRA on 2 Super: 4×H100 ≈ $12/h; full fine-tune: 8×H100 ≈ $25/h. W3 ≈ $3–6k; W4–W5 ≈ $15–30k (closed-loop RL is the heavy item). Six months ≈ **$30–60k** compute, plus storage.
+LoRA on 2 Super: 4×H100 ≈ $12/h; full fine-tune: 8×H100 ≈ $25/h. The 4–8 H100 envelope holds **only with PEFT** (D-004, D-014): the official recipe as shipped needs 32 H100 for stage 1. W3 ≈ $3–6k; W4–W5 ≈ $15–30k (closed-loop RL is the heavy item). Six months ≈ **$30–60k** compute, plus storage.
 
 ## 7. Organisation
 - Ousseynou decides; every design decision is logged in `DECISIONS.md`.
@@ -98,7 +99,8 @@ LoRA on 2 Super: 4×H100 ≈ $12/h; full fine-tune: 8×H100 ≈ $25/h. W3 ≈ $3
 ## 8. Risks
 | Risk | Mitigation |
 |---|---|
-| NVIDIA ships a 2 Super recipe during W1 | Good news: adopt it, redirect effort to W3–W4. Watch the repo weekly. |
+| NVIDIA ships a 2 Super recipe during W1 | **Happened 2026-09-30** (`alpamayo-recipes` #39, trajectory only, full fine-tuning, 32 H100). Response: D-014 (proposed), add PEFT, keep watching the repo weekly. |
+| Loss of CoC when training on trajectory only (the official recipe's targets) | Never train W1/W3 on trajectory-only targets: CoC in `components_order`, 40% clean examples whose target is the model's own CoC, `afh` axes 1–4 on clean input as a blocking non-regression check. |
 | NVIDIA AV Dataset licence on redistributing derived weights | **Verify in Phase 0**, before sharing any checkpoint. |
 | Catastrophic forgetting | LoRA, 40% clean examples, non-regression as a blocking criterion. |
 | Reward hacking (W4) | Composite reward, negative control in the reward, held-out scenes. |

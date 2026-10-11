@@ -137,7 +137,7 @@ Le modèle est `TrainableAlpamayo2Super` (`training_stage="vlm"`), l'exemple pas
 2. si le bloc 1 n'en a pas produit, un texte de remplacement (`kind: synthetic`) fait de phrases de CoC réelles, dont la longueur en jetons est le **maximum** d'une distribution réelle : les CoC de toutes les exécutions du bloc 1 s'il y en a, sinon les 15 CoC d'Alpamayo 2 Super des fixtures `afh` (`records_a2.json`, 8 à 30 mots). Le maximum, parce qu'on mesure de la mémoire. La distribution, la statistique et la longueur mesurée sont écrites dans le JSON ;
 3. `--cot-text` force un texte (`kind: user`).
 
-**Pas de troncature.** La longueur réelle de la séquence est mesurée avant padding (`steps.sequence_before_padding.real_len`). Au-delà de 6 144 jetons, la sonde lève `SequenceTooLong` et s'arrête : elle ne tronque pas et ne réduit pas l'entrée pour faire tenir une séquence trop longue. Après le collate, elle vérifie que le lot paddé contient exactement les jetons réels d'avant le padding.
+**Pas de troncature.** La longueur réelle de la séquence est mesurée avant padding (`steps.sequence_before_padding.real_len`). Au-delà de 6 144 jetons, la sonde lève `SequenceTooLong` : la longueur mesurée et la configuration sont enregistrées comme constat (`summary.findings`), puis la sonde passe à la configuration suivante, comme pour un OOM. Elle ne tronque jamais. Après le collate, elle vérifie que le lot paddé contient exactement les jetons réels d'avant le padding.
 
 ```bash
 cd $WS/aconcagua
@@ -146,7 +146,7 @@ $WS/venvs/a2sft/bin/python runners/probe_train_memory_a2.py \
     --tokens-json $OUT/tokens_a2_0ea6fd88.json --out $OUT/train_memory_a2.json
 ```
 
-En cas d'OOM, et seulement d'OOM, la sonde libère la mémoire et réessaie seule, dans cet ordre : 7 caméras × 4 images (défaut de la recette), 6 × 4 (profil trajectoire de la release), 4 × 4 (défaut 1.5), 2 × 4, 1 × 4, 1 × 2, 1 × 1 (config de debug de la recette). Elle s'arrête à la première qui passe et l'indique dans `summary.retained_config`. Toute autre erreur, séquence trop longue comprise, arrête la sonde avec son message. Le JSON est réécrit après chaque étape.
+En cas d'OOM ou de séquence trop longue, la sonde libère la mémoire et réessaie seule, dans cet ordre : 7 caméras × 4 images (défaut de la recette), 6 × 4 (profil trajectoire de la release), 4 × 4 (défaut 1.5), 2 × 4, 1 × 4, 1 × 2, 1 × 1 (config de debug de la recette), jusqu'à obtenir une mesure. Chaque configuration abandonnée garde sa raison, `oom` ou `too_long` (`summary.abandoned`). La première qui passe est retenue (`summary.retained_config`) ; si des configurations plus grandes ont été abandonnées avant elle, elle est marquée réduite (`summary.retained_reduced`) avec ses raisons (`summary.reduced_because`). Toute autre erreur arrête la sonde avec son message. Le JSON est réécrit après chaque étape.
 
 Si le temps le permet, deux mesures complémentaires :
 
@@ -164,7 +164,7 @@ Lecture rapide :
 python3 -c "import json;d=json.load(open('$OUT/train_memory_a2.json'));print(json.dumps(d['summary'],indent=1));a=[x for x in d['attempts'] if x['status']=='ok'];print(a and a[0]['steps']['sequence']['assistant_first_tokens'])"
 ```
 
-**À noter.** `env.gpu` et `env.gpu_requirement` ; `training_path.cot` : `kind`, `source`, `tokens` et, si synthétique, `length_distribution` ; `summary.weights_gib` ; `summary.retained_config` ; pour chaque tentative : statut, étape qui a échoué, `steps.sequence_before_padding.real_len`, part visuelle, pic mémoire après forward et après backward (inconnues 6 et 8) ; `forward.loss`, `future_traj_ce`, `others_ce` finies et normes de gradient non nulles (inconnue 5) ; `sequence.assistant_first_tokens` (format de la cible CoC produite par le template officiel, à comparer au bloc 1 pour D-008 / D-011). **Critère D-014** : si une configuration passe sur le H200 avec ces gradients de taille PEFT, W1 part de 2 Super sur le code de la recette et 1.5 devient le repli ; sinon D-003 tient.
+**À noter.** `env.gpu` et `env.gpu_requirement` ; `training_path.cot` : `kind`, `source`, `tokens` et, si synthétique, `length_distribution` ; `summary.weights_gib` ; `summary.retained_config`, `retained_reduced`, `reduced_because`, `abandoned` et `findings` ; pour chaque tentative : statut, étape qui a échoué, `steps.sequence_before_padding.real_len`, part visuelle, pic mémoire après forward et après backward (inconnues 6 et 8) ; `forward.loss`, `future_traj_ce`, `others_ce` finies et normes de gradient non nulles (inconnue 5) ; `sequence.assistant_first_tokens` (format de la cible CoC produite par le template officiel, à comparer au bloc 1 pour D-008 / D-011). **Critère D-014** : si une configuration passe sur le H200 avec ces gradients de taille PEFT, W1 part de 2 Super sur le code de la recette et 1.5 devient le repli ; sinon D-003 tient.
 
 ---
 

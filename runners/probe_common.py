@@ -258,9 +258,8 @@ def check_sequence_length(real_len: int, max_length: int) -> None:
 
 
 def classify_error(exc: BaseException) -> str:
-    """'oom' (retry with a smaller input), 'too_long' (stop: the sequence does not fit the
-    recipe's max_length, which is a finding, not something to shrink away), or 'other'
-    (stop: a bug is not a memory measurement)."""
+    """'oom' or 'too_long' (both recorded, then retried with a smaller input; a too-long
+    sequence is never truncated), or 'other' (stop: a bug is not a memory measurement)."""
     name = type(exc).__name__
     msg = str(exc).lower()
     if name == "OutOfMemoryError" or "out of memory" in msg or "cuda error: out of memory" in msg:
@@ -277,6 +276,8 @@ class Attempt:
     failed_step: Optional[str] = None
     error: Optional[str] = None
     steps: dict = field(default_factory=dict)   # step name -> measurements
+    reduced: bool = False              # ok, but only after larger configurations were abandoned
+    reduced_because: list = field(default_factory=list)   # ordered unique reasons: oom, too_long
 
 
 def run_with_fallback(
@@ -291,13 +292,20 @@ def run_with_fallback(
     step by step, so measurements taken before a failure are kept) and raises on failure;
     it should set `steps["_current"]` to the step name it is running.
 
-    OOM -> record, `cleanup()`, try the next config. Too long (above max_length) or any
-    other error -> record and stop. First success stops unless `sweep`.
-    `on_update(attempts)` is called after every attempt (write the JSON there).
+    OOM or too long (SequenceTooLong, above max_length) -> record the reason, `cleanup()`,
+    try the next config (fewer cameras, then fewer frames). A too-long sequence is also
+    written to `findings` with its measured length and configuration; nothing is ever
+    truncated. Any other error -> record and stop. The first config that passes is retained;
+    if larger configs were abandoned before it, it is marked `reduced` with the reasons.
+    First success stops unless `sweep`. `on_update(attempts)` is called after every attempt.
+    The real length is read from `steps["sequence_before_padding"]` when the attempt set it.
     """
     attempts: list[dict] = []
     retained: Optional[str] = None
     stopped_on_error = False
+    abandoned: list[dict] = []          # configs given up before the retained one
+    findings: list[dict] = []           # SequenceTooLong constats
+    reduced_because: list[str] = []
     for cfg in configs:
         att = Attempt(config=asdict(cfg))
         steps: dict = {}
@@ -306,6 +314,9 @@ def run_with_fallback(
             att.status = "ok"
             if retained is None:
                 retained = cfg.name
+                if abandoned:
+                    att.reduced = True
+                    att.reduced_because = list(reduced_because)
         except BaseException as exc:  # noqa: BLE001 — every failure must be recorded
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -313,8 +324,24 @@ def run_with_fallback(
             att.status = kind if kind != "other" else "error"
             att.failed_step = steps.get("_current")
             att.error = f"{type(exc).__name__}: {str(exc)[:500]}"
-            if kind != "oom":
+            if kind == "other":
                 stopped_on_error = True
+            elif retained is None:
+                seq = steps.get("sequence_before_padding") or {}
+                abandoned.append({"config": cfg.name, "reason": kind,
+                                  "failed_step": att.failed_step,
+                                  "real_len": seq.get("real_len"),
+                                  "max_length": seq.get("max_length")})
+                if kind not in reduced_because:
+                    reduced_because.append(kind)
+            if kind == "too_long":
+                seq = steps.get("sequence_before_padding") or {}
+                findings.append({"finding": "SequenceTooLong", "config": cfg.name,
+                                 "camera_ids": list(cfg.camera_ids),
+                                 "frame_indices": list(cfg.frame_indices),
+                                 "real_len": seq.get("real_len"),
+                                 "max_length": seq.get("max_length"),
+                                 "truncated": False, "error": att.error})
         finally:
             steps.pop("_current", None)
             att.steps = steps
@@ -325,8 +352,11 @@ def run_with_fallback(
                 on_update(attempts)
         if stopped_on_error or (retained is not None and not sweep):
             break
-    return {"retained_config": retained, "stopped_on_error": stopped_on_error,
-            "attempts": attempts}
+    return {"retained_config": retained,
+            "retained_reduced": bool(retained is not None and abandoned),
+            "reduced_because": list(reduced_because) if retained is not None else [],
+            "abandoned": abandoned, "findings": findings,
+            "stopped_on_error": stopped_on_error, "attempts": attempts}
 
 
 def count_span(ids: Sequence[int], start_id: Optional[int], end_id: Optional[int]) -> Optional[int]:

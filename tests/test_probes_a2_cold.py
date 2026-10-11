@@ -336,19 +336,90 @@ def test_fallback_keeps_partial_measurements_and_stops_at_first_success():
     json.dumps(res)
 
 
-def test_too_long_sequence_raises_and_stops_without_shrinking():
+def test_too_long_is_a_finding_then_falls_back_like_an_oom_and_marks_the_retained_reduced():
+    names = [c.name for c in pc.FALLBACK_CONFIGS]
+    first = pc.FALLBACK_CONFIGS[0]
+    outcomes = {n: "ok" for n in names}
+    outcomes[names[0]] = "too_long"
+    outcomes[names[1]] = "oom_forward"
+    outcomes[names[2]] = "too_long"
+    updates, cleanups = [], []
+    res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, _fake_attempt(outcomes),
+                               on_update=lambda a: updates.append(len(a)),
+                               cleanup=lambda: cleanups.append(1))
+    # Not a stop: the probe keeps shrinking until a configuration yields a measurement.
+    assert not res["stopped_on_error"]
+    assert res["retained_config"] == names[3]
+    att = res["attempts"]
+    assert [a["status"] for a in att] == ["too_long", "oom", "too_long", "ok"]
+    assert [a["failed_step"] for a in att] == ["length_check", "forward", "length_check", None]
+    assert updates == [1, 2, 3, 4] and len(cleanups) == 4
+    # Each too-long attempt keeps its measured length; the error says nothing was truncated.
+    assert att[0]["steps"]["sequence_before_padding"] == {"real_len": 9000, "max_length": 6144}
+    assert "SequenceTooLong" in att[0]["error"] and "does not truncate" in att[0]["error"]
+    assert "sequence" not in att[0]["steps"] and "forward" not in att[0]["steps"]
+    # Findings: one SequenceTooLong per too-long configuration, with length and configuration.
+    assert len(res["findings"]) == 2
+    f0 = res["findings"][0]
+    assert f0["finding"] == "SequenceTooLong" and f0["config"] == names[0]
+    assert f0["camera_ids"] == list(first.camera_ids) and f0["frame_indices"] == list(first.frame_indices)
+    assert f0["real_len"] == 9000 and f0["max_length"] == 6144 and f0["truncated"] is False
+    assert f0["error"] == att[0]["error"]
+    assert res["findings"][1]["config"] == names[2]
+    # Every abandoned configuration keeps its reason.
+    assert [(a["config"], a["reason"]) for a in res["abandoned"]] == \
+        [(names[0], "too_long"), (names[1], "oom"), (names[2], "too_long")]
+    assert res["abandoned"][0]["real_len"] == 9000 and res["abandoned"][0]["failed_step"] == "length_check"
+    assert res["abandoned"][1]["failed_step"] == "forward"
+    # The configuration that finally fits is marked reduced, with the reasons (first-seen order).
+    assert res["retained_reduced"] is True and res["reduced_because"] == ["too_long", "oom"]
+    assert att[3]["reduced"] is True and att[3]["reduced_because"] == ["too_long", "oom"]
+    assert not any(a["reduced"] for a in att[:3])
+    s = pmem.summarize(res, {"memory_allocated_gib": 68.0})
+    assert s["retained_config"] == names[3] and s["retained_reduced"] is True
+    assert s["reduced_because"] == ["too_long", "oom"]
+    assert s["findings"] == res["findings"] and s["abandoned"] == res["abandoned"]
+    assert [r["real_len"] for r in s["attempts"]][0] == 9000
+    assert s["attempts"][3]["reduced"] is True and s["attempts"][3]["reduced_because"] == ["too_long", "oom"]
+    json.dumps(res)
+
+
+def test_too_long_only_reason_and_unreduced_first_config():
     names = [c.name for c in pc.FALLBACK_CONFIGS]
     outcomes = {n: "ok" for n in names}
     outcomes[names[0]] = "too_long"
     res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, _fake_attempt(outcomes))
-    assert res["stopped_on_error"] and res["retained_config"] is None
-    assert len(res["attempts"]) == 1, "a too-long sequence must not be shrunk away"
-    a = res["attempts"][0]
-    assert a["status"] == "too_long" and a["failed_step"] == "length_check"
-    assert a["steps"]["sequence_before_padding"] == {"real_len": 9000, "max_length": 6144}
-    assert "SequenceTooLong" in a["error"] and "does not truncate" in a["error"]
-    s = pmem.summarize(res, {"memory_allocated_gib": 68.0})
-    assert s["attempts"][0]["real_len"] == 9000
+    assert res["retained_config"] == names[1] and res["reduced_because"] == ["too_long"]
+    # The first configuration passes: nothing abandoned, nothing reduced, no finding.
+    res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, _fake_attempt({n: "ok" for n in names}))
+    assert res["retained_config"] == names[0] and res["retained_reduced"] is False
+    assert res["reduced_because"] == [] and res["abandoned"] == [] and res["findings"] == []
+    assert res["attempts"][0]["reduced"] is False
+
+
+def test_every_config_too_long_records_all_findings_and_retains_nothing():
+    names = [c.name for c in pc.FALLBACK_CONFIGS]
+    res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, _fake_attempt({n: "too_long" for n in names}))
+    assert res["retained_config"] is None and not res["stopped_on_error"]
+    assert len(res["attempts"]) == len(names) and len(res["findings"]) == len(names)
+    assert res["retained_reduced"] is False and res["reduced_because"] == []
+    assert all(a["reason"] == "too_long" for a in res["abandoned"])
+    assert all(f["truncated"] is False and f["real_len"] == 9000 for f in res["findings"])
+
+
+def test_too_long_raised_by_the_recipe_processor_is_also_a_finding():
+    """The recipe's own length check (before ours) is classified too_long as well."""
+    names = [c.name for c in pc.FALLBACK_CONFIGS]
+
+    def attempt(cfg, steps):
+        steps["_current"] = "preprocess"
+        if cfg.name == names[0]:
+            raise ValueError("Tokenized sample length 7001 exceeds max_length=6144")
+    res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, attempt)
+    assert res["retained_config"] == names[1] and res["reduced_because"] == ["too_long"]
+    f = res["findings"][0]
+    assert f["config"] == names[0] and f["truncated"] is False and "7001" in f["error"]
+    assert res["abandoned"][0]["failed_step"] == "preprocess"
 
 
 def test_check_sequence_length_boundary():

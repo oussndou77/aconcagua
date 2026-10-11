@@ -39,5 +39,6 @@ layout of the harness fixture `fixtures/cf_0ea6fd88_a2_blackout.json`. It runs i
 `runners/probe_tokens_a2.py` runs the Alpamayo 2 Super release inference path unchanged and
 reports what it generates (first tokens, whether `<|cot_start|>` appears, meta-actions).
 `runners/probe_train_memory_a2.py` measures one stage-1 training step on one GPU through the
-official recipe path, falling back to fewer cameras then fewer frames on OOM. Both run in the
+official recipe path, falling back to fewer cameras then fewer frames on OOM or on a sequence
+longer than 6 144 tokens (recorded, never truncated). Both run in the
 `alpamayo2_sft` recipe environment; `runners/probe_common.py` holds their torch-free logic.

@@ -23,9 +23,10 @@ Where the CoC comes from (probe_common.choose_cot, recorded under training_path.
      statistic and the measured token length are written in the JSON.
 
 The real sequence length (before padding) is measured right after preprocessing. Above the
-recipe's max_length (6 144) the probe raises SequenceTooLong and stops: it never truncates,
-and it does not shrink the input to make a too-long sequence fit. After collation it checks
-that the padded batch still holds every real token.
+recipe's max_length (6 144) the probe raises SequenceTooLong: the length and the configuration
+are recorded as a finding (`findings`), and the probe moves on to the next, smaller
+configuration, exactly as for an OOM. It never truncates. After collation it checks that the
+padded batch still holds every real token.
 
 GPU: block 2 needs an H200 (141 GB) or larger; the probe refuses a GPU under 120 GiB unless
 --allow-small-gpu is passed, and records it (such a run does not count for D-014).
@@ -43,9 +44,10 @@ tokens, CoC tokens, assistant-mask tokens and its first tokens (training format 
 D-008), losses, q_proj gradient norms, and torch.cuda.max_memory_allocated / memory_allocated
 after load, after the forward and after the backward.
 
-On OOM it frees memory and retries with fewer cameras, then fewer frames
-(probe_common.FALLBACK_CONFIGS), and reports the configuration that passes. Any other error,
-including a too-long sequence, stops the probe with its message.
+On OOM or a too-long sequence it frees memory and retries with fewer cameras, then fewer frames
+(probe_common.FALLBACK_CONFIGS), until a configuration gives a measurement. Every abandoned
+configuration keeps its reason (oom or too_long); the configuration that finally passes is
+marked reduced (`retained_reduced`, `reduced_because`). Any other error stops the probe.
 The JSON is rewritten after every step, so a crash still leaves a measurement.
 
 Usage (recipe venv, see docs/gpu_session_01.md block 0):
@@ -379,6 +381,7 @@ def summarize(result: dict, load_step: dict) -> dict:
         s = a["steps"]
         rows.append({
             "config": a["config"]["name"], "status": a["status"], "failed_step": a["failed_step"],
+            "reduced": a.get("reduced", False), "reduced_because": a.get("reduced_because", []),
             "real_len": ((s.get("sequence_before_padding") or {}).get("real_len")
                          or (s.get("sequence") or {}).get("real_len")),
             "visual_share": (s.get("sequence") or {}).get("visual_share_of_real"),
@@ -388,6 +391,10 @@ def summarize(result: dict, load_step: dict) -> dict:
         })
     return {"weights_gib": load_step.get("memory_allocated_gib"),
             "retained_config": result["retained_config"],
+            "retained_reduced": result.get("retained_reduced", False),
+            "reduced_because": result.get("reduced_because", []),
+            "abandoned": result.get("abandoned", []),
+            "findings": result.get("findings", []),
             "stopped_on_error": result["stopped_on_error"], "attempts": rows}
 
 

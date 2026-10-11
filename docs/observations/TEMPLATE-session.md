@@ -62,7 +62,7 @@
 
 | Mesure | Valeur |
 |---|---|
-| Configuration retenue (`summary.retained_config`) | |
+| Configuration retenue, réduite ou non, et pourquoi (`summary.retained_config`, `retained_reduced`, `reduced_because`) | |
 | `forward.loss` / `future_traj_ce` / `others_ce` | |
 | Normes de gradient (`backward.grad_norms`) | |
 | Erreur hors OOM éventuelle (`attempts[k].error`, `stopped_on_error`) | |
@@ -79,15 +79,19 @@
 
 **Valeur observée.**
 
-| Configuration | Statut | Étape en échec | Pic après forward (GiB) | Pic après backward (GiB) |
-|---|---|---|---|---|
-| 7 caméras × 4 images | | | | |
-| 6 × 4 | | | | |
-| 4 × 4 | | | | |
-| 2 × 4 | | | | |
-| 1 × 4 | | | | |
-| 1 × 2 | | | | |
-| 1 × 1 | | | | |
+| Configuration | Statut (`ok`, `oom`, `too_long`) | Étape en échec | Longueur réelle | Pic après forward (GiB) | Pic après backward (GiB) |
+|---|---|---|---|---|---|
+| 7 caméras × 4 images | | | | | |
+| 6 × 4 | | | | | |
+| 4 × 4 | | | | | |
+| 2 × 4 | | | | | |
+| 1 × 4 | | | | | |
+| 1 × 2 | | | | | |
+| 1 × 1 | | | | | |
+
+| Constats `SequenceTooLong` (`summary.findings`) : configuration, longueur réelle, `max_length` | |
+|---|---|
+| | |
 
 | Mesure | Valeur |
 |---|---|
@@ -114,7 +118,7 @@
 
 **Commande et JSON source.** `runners/probe_train_memory_a2.py` (bloc 2), `attempts[k].steps.sequence` ; pour comparaison, `prompt.prompt_len` et `prompt.n_image_pad` de `tokens_a2_0ea6fd88.json` (bloc 1, profil 6 caméras).
 
-**Conclusion.** (Marge sous 6 144 ; coût du CoC en jetons ; une séquence au-delà de 6 144 arrête la sonde avec `SequenceTooLong`, à rapporter tel quel.)
+**Conclusion.** (Marge sous 6 144 ; coût du CoC en jetons ; chaque séquence au-delà de 6 144 est un constat `SequenceTooLong` à rapporter tel quel, avec sa configuration ; la mesure retenue est alors marquée réduite.)
 
 ---
 

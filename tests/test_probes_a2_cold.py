@@ -288,18 +288,21 @@ def test_classify_error():
     assert pc.classify_error(OutOfMemoryError("CUDA out of memory. Tried to allocate")) == "oom"
     assert pc.classify_error(RuntimeError("CUDA error: out of memory")) == "oom"
     assert pc.classify_error(ValueError("Tokenized sample length 7001 exceeds max_length=6144")) == "too_long"
+    assert pc.classify_error(pc.SequenceTooLong("real sequence length 7001")) == "too_long"
     assert pc.classify_error(KeyError("pixel_values")) == "other"
 
 
-def _fake_attempt(outcomes):
+def _fake_attempt(outcomes, max_length=6144):
     """attempt_fn whose behaviour per config name is 'ok', 'oom_forward', 'oom_backward',
     'too_long' or 'bug'; it records measurements step by step like the real probe."""
     def attempt(cfg, steps):
         what = outcomes[cfg.name]
-        steps["_current"] = "collate"
-        if what == "too_long":
-            raise ValueError("Tokenized sample length 9000 exceeds max_length=6144")
-        steps["sequence"] = {"real_len": 100 * len(cfg.camera_ids) * len(cfg.frame_indices)}
+        steps["_current"] = "preprocess"
+        real_len = 9000 if what == "too_long" else 100 * len(cfg.camera_ids) * len(cfg.frame_indices)
+        steps["sequence_before_padding"] = {"real_len": real_len, "max_length": max_length}
+        steps["_current"] = "length_check"
+        pc.check_sequence_length(real_len, max_length)
+        steps["sequence"] = {"real_len": real_len}
         steps["_current"] = "forward"
         if what == "oom_forward":
             raise OutOfMemoryError("CUDA out of memory")
@@ -316,22 +319,43 @@ def _fake_attempt(outcomes):
 def test_fallback_keeps_partial_measurements_and_stops_at_first_success():
     names = [c.name for c in pc.FALLBACK_CONFIGS]
     outcomes = {n: "ok" for n in names}
-    outcomes[names[0]] = "too_long"
-    outcomes[names[1]] = "oom_forward"
-    outcomes[names[2]] = "oom_backward"
+    outcomes[names[0]] = "oom_forward"
+    outcomes[names[1]] = "oom_backward"
     updates, cleanups = [], []
     res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, _fake_attempt(outcomes),
                                on_update=lambda a: updates.append(len(a)),
                                cleanup=lambda: cleanups.append(1))
-    assert res["retained_config"] == names[3] and not res["stopped_on_error"]
+    assert res["retained_config"] == names[2] and not res["stopped_on_error"]
     att = res["attempts"]
-    assert [a["status"] for a in att] == ["too_long", "oom", "oom", "ok"]
-    assert [a["failed_step"] for a in att] == ["collate", "forward", "backward", None]
-    assert att[1]["steps"]["sequence"]["real_len"] == 2400          # measured before the OOM
-    assert att[2]["steps"]["forward"]["max_memory_allocated_gib"] == 74.0   # partial = measurement
-    assert "_current" not in att[3]["steps"]
-    assert updates == [1, 2, 3, 4] and len(cleanups) == 4
+    assert [a["status"] for a in att] == ["oom", "oom", "ok"]
+    assert [a["failed_step"] for a in att] == ["forward", "backward", None]
+    assert att[0]["steps"]["sequence_before_padding"]["real_len"] == 2800   # measured before the OOM
+    assert att[1]["steps"]["forward"]["max_memory_allocated_gib"] == 76.0   # partial = measurement
+    assert "_current" not in att[2]["steps"]
+    assert updates == [1, 2, 3] and len(cleanups) == 3
     json.dumps(res)
+
+
+def test_too_long_sequence_raises_and_stops_without_shrinking():
+    names = [c.name for c in pc.FALLBACK_CONFIGS]
+    outcomes = {n: "ok" for n in names}
+    outcomes[names[0]] = "too_long"
+    res = pc.run_with_fallback(pc.FALLBACK_CONFIGS, _fake_attempt(outcomes))
+    assert res["stopped_on_error"] and res["retained_config"] is None
+    assert len(res["attempts"]) == 1, "a too-long sequence must not be shrunk away"
+    a = res["attempts"][0]
+    assert a["status"] == "too_long" and a["failed_step"] == "length_check"
+    assert a["steps"]["sequence_before_padding"] == {"real_len": 9000, "max_length": 6144}
+    assert "SequenceTooLong" in a["error"] and "does not truncate" in a["error"]
+    s = pmem.summarize(res, {"memory_allocated_gib": 68.0})
+    assert s["attempts"][0]["real_len"] == 9000
+
+
+def test_check_sequence_length_boundary():
+    pc.check_sequence_length(6144, 6144)
+    with pytest.raises(pc.SequenceTooLong):
+        pc.check_sequence_length(6145, 6144)
+    assert pc.classify_error(pc.SequenceTooLong("x")) == "too_long"
 
 
 def test_fallback_sweep_and_stop_on_non_oom_error():
@@ -368,21 +392,79 @@ def test_summarize_rows():
     assert s["attempts"][1]["peak_backward_gib"] == 75.0
 
 
+# --------------------------------------------------------------------------- CoC provenance and length
+
+def _word_codec():
+    """Word-level fake tokenizer: one token per whitespace-separated word."""
+    return (lambda t: t.split()), (lambda ids: " ".join(ids))
+
+
+def test_choose_cot_prefers_user_then_block1_real_generation():
+    enc, dec = _word_codec()
+    b1 = {"summary": {"cot_for_training": "A red light is ahead.", "cot_source": "untagged"}}
+    info = pc.choose_cot("Yield to the cyclist.", b1, ["x"], enc, dec)
+    assert info["kind"] == "user" and info["tokens"] == 4
+    info = pc.choose_cot(None, b1, ["x"], enc, dec)
+    assert info["kind"] == "real" and info["text"] == "A red light is ahead."
+    assert info["tokens"] == 5 and "block 1" in info["source"] and "length_distribution" not in info
+
+
+def test_choose_cot_placeholder_length_is_max_of_block1_distribution():
+    enc, dec = _word_codec()
+    b1 = {"summary": {"cot_for_training": ""},
+          "runs": [{"cot_for_training": ""}, {"cot_for_training": "Slow for the bus ahead."},
+                   {"cot_for_training": "Keep lane because the road is clear and no agents are near."}],
+          "meta_action_task": {"cot_for_training": "Stop."}}
+    info = pc.choose_cot(None, b1, ["unused reference"], enc, dec)
+    d = info["length_distribution"]
+    assert info["kind"] == "synthetic" and d["name"] == "block1_cots"
+    assert d["token_lengths"] == [5, 12, 1] and d["statistic"] == "max" and d["target_tokens"] == 12
+    assert info["tokens"] == 12
+
+
+def test_choose_cot_falls_back_to_real_a2_fixture_cots(afh_fixture_dir):
+    if afh_fixture_dir is None:
+        pytest.skip("pinned afh checkout absent")
+    refs = pc.reference_cots(os.path.join(afh_fixture_dir, "records_a2.json"))
+    assert len(refs) == 15 and refs[0].startswith("Change to the left lane")
+    enc, dec = _word_codec()
+    info = pc.choose_cot(None, None, refs, enc, dec)
+    d = info["length_distribution"]
+    assert d["name"] == "afh_fixture_a2_cots" and len(d["token_lengths"]) == 15
+    assert info["tokens"] == d["target_tokens"] == max(len(r.split()) for r in refs)
+    cf = pc.reference_cots(os.path.join(afh_fixture_dir, "cf_0ea6fd88_a2_blackout.json"))
+    assert cf[0].startswith("Nudge left")
+    with pytest.raises(ValueError):
+        pc.choose_cot(None, None, [], enc, dec)
+
+
+def test_synthesize_text_exact_token_count():
+    enc, dec = _word_codec()
+    t = pc.synthesize_text(["one two", "three"], 7, enc, dec)
+    assert t == "one two three one two three one" and len(enc(t)) == 7
+    with pytest.raises(ValueError):
+        pc.synthesize_text([], 3, enc, dec)
+
+
+def test_read_block1_and_gpu_gate(tmp_path):
+    p = tmp_path / "tokens.json"
+    p.write_text(json.dumps({"summary": {"cot_for_training": "Go."}}))
+    data, note = pmem.read_block1(str(p))
+    assert data["summary"]["cot_for_training"] == "Go." and note == str(p)
+    assert pmem.read_block1(str(tmp_path / "missing.json"))[0] is None
+    assert pmem.read_block1(None) == (None, "no --tokens-json")
+    assert pmem.gpu_gate(140.4, False)["meets_requirement"]                 # H200
+    with pytest.raises(SystemExit, match="H200"):
+        pmem.gpu_gate(79.2, False)                                           # H100 80 GB
+    g = pmem.gpu_gate(79.2, True)
+    assert g["overridden"] and not g["meets_requirement"]
+
+
 def test_count_span():
     assert pc.count_span([1, 5, 9, 9, 6, 2], 5, 6) == 2
     assert pc.count_span([1, 2], 5, 6) is None
     assert pc.count_span([5, 1], 5, 6) is None
     assert pc.count_span([5, 6], None, 6) is None
-
-
-def test_read_cot_from_block1_json(tmp_path):
-    p = tmp_path / "tokens.json"
-    p.write_text(json.dumps({"summary": {"cot_for_training": "A red light is ahead.",
-                                         "cot_source": "untagged_text_before_meta_action_or_traj"}}))
-    cot, src = pmem.read_cot(str(p), None)
-    assert cot == "A red light is ahead." and "untagged" in src
-    assert pmem.read_cot(str(p), "override")[0] == "override"
-    assert pmem.read_cot(None, None) == (None, "none")
 
 
 def test_write_json_is_atomic(tmp_path):

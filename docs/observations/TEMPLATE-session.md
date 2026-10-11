@@ -91,13 +91,14 @@
 
 | Mesure | Valeur |
 |---|---|
+| GPU et respect de l'exigence H200 (`env.gpu`, `env.gpu_requirement.meets_requirement`, `overridden`) | |
 | Poids chargés (`summary.weights_gib`) | |
-| Mémoire totale du GPU (`env.gpu.total_memory_gib`) | |
 | Paramètres entraînables (`trainable.n_params`) | |
+| CoC de l'exemple : nature, source, longueur (`training_path.cot.kind`, `source`, `tokens`, `length_distribution` si synthétique) | |
 
 **Commande et JSON source.** `runners/probe_train_memory_a2.py` (bloc 2), `summary.attempts` de `train_memory_a2.json` ; `train_memory_a2_sweep.json` si `--sweep` a tourné.
 
-**Conclusion.** (Ce que ça implique pour LoRA sur 4×H100 : réplication par GPU impossible / possible avec ZeRO-3 ou base quantifiée — entrée de D-009 et D-014.)
+**Conclusion.** (Critère D-014 : une configuration passe-t-elle sur le H200 avec des gradients de taille PEFT ? Si oui, W1 part de 2 Super sur le code de la recette et 1.5 devient le repli ; sinon D-003 tient. Ce que ça implique pour LoRA sur 4×H100 : entrée de D-009.)
 
 ---
 
@@ -107,13 +108,13 @@
 
 **Valeur observée.**
 
-| Configuration | Longueur réelle | Longueur paddée | Jetons visuels | Part visuelle | Jetons du CoC | Jetons sous le masque |
+| Configuration | Longueur réelle avant padding (`sequence_before_padding.real_len`) | Longueur paddée | Jetons visuels | Part visuelle | Jetons du CoC | Jetons sous le masque |
 |---|---|---|---|---|---|---|
 | | | | | | | |
 
 **Commande et JSON source.** `runners/probe_train_memory_a2.py` (bloc 2), `attempts[k].steps.sequence` ; pour comparaison, `prompt.prompt_len` et `prompt.n_image_pad` de `tokens_a2_0ea6fd88.json` (bloc 1, profil 6 caméras).
 
-**Conclusion.** (Marge sous 6 144 ; coût du CoC en jetons.)
+**Conclusion.** (Marge sous 6 144 ; coût du CoC en jetons ; une séquence au-delà de 6 144 arrête la sonde avec `SequenceTooLong`, à rapporter tel quel.)
 
 ---
 

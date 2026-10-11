@@ -244,14 +244,28 @@ FALLBACK_CONFIGS = (
 )
 
 
+class SequenceTooLong(ValueError):
+    """The real (unpadded) sequence exceeds the recipe's max_length. Never truncated."""
+
+
+def check_sequence_length(real_len: int, max_length: int) -> None:
+    """Raise SequenceTooLong when real_len > max_length (the recipe pads to 6 144 and the
+    probe must never silently truncate to fit)."""
+    if real_len > max_length:
+        raise SequenceTooLong(
+            f"real sequence length {real_len} exceeds max_length={max_length}; "
+            "the probe does not truncate (recipe: sft_base.yaml collator.max_length)")
+
+
 def classify_error(exc: BaseException) -> str:
-    """'oom' (retry with a smaller input), 'too_long' (collator max_length, also retried),
-    or 'other' (stop: a bug is not a memory measurement)."""
+    """'oom' (retry with a smaller input), 'too_long' (stop: the sequence does not fit the
+    recipe's max_length, which is a finding, not something to shrink away), or 'other'
+    (stop: a bug is not a memory measurement)."""
     name = type(exc).__name__
     msg = str(exc).lower()
     if name == "OutOfMemoryError" or "out of memory" in msg or "cuda error: out of memory" in msg:
         return "oom"
-    if "exceeds max_length" in msg:
+    if isinstance(exc, SequenceTooLong) or "exceeds max_length" in msg:
         return "too_long"
     return "other"
 
@@ -277,9 +291,9 @@ def run_with_fallback(
     step by step, so measurements taken before a failure are kept) and raises on failure;
     it should set `steps["_current"]` to the step name it is running.
 
-    OOM or too-long -> record, `cleanup()`, try the next config. Any other error -> record
-    and stop. First success stops unless `sweep`. `on_update(attempts)` is called after
-    every attempt (write the JSON there).
+    OOM -> record, `cleanup()`, try the next config. Too long (above max_length) or any
+    other error -> record and stop. First success stops unless `sweep`.
+    `on_update(attempts)` is called after every attempt (write the JSON there).
     """
     attempts: list[dict] = []
     retained: Optional[str] = None
@@ -299,7 +313,7 @@ def run_with_fallback(
             att.status = kind if kind != "other" else "error"
             att.failed_step = steps.get("_current")
             att.error = f"{type(exc).__name__}: {str(exc)[:500]}"
-            if kind == "other":
+            if kind != "oom":
                 stopped_on_error = True
         finally:
             steps.pop("_current", None)
@@ -326,6 +340,78 @@ def count_span(ids: Sequence[int], start_id: Optional[int], end_id: Optional[int
     except ValueError:
         return None
     return j - i - 1
+
+
+# --------------------------------------------------------------------------- CoC of the training example
+
+def reference_cots(path: str) -> list[str]:
+    """Real Alpamayo 2 Super CoC texts from an afh fixture: records.json (traces[].raw_text)
+    or a counterfactual payload (baseline_traces). Empty strings dropped."""
+    with open(path) as fh:
+        data = json.load(fh)
+    texts: list[str] = []
+    if isinstance(data, list):
+        for rec in data:
+            texts += [t.get("raw_text", "") for t in rec.get("traces", [])]
+    elif isinstance(data, dict):
+        texts += list(data.get("baseline_traces", []))
+    return [t.strip() for t in texts if t and t.strip()]
+
+
+def block1_cots(block1: Optional[dict]) -> list[str]:
+    """Every CoC block 1 produced (all runs, then the meta_action task), non-empty, in order."""
+    if not block1:
+        return []
+    out = [r.get("cot_for_training") for r in block1.get("runs", [])]
+    out.append((block1.get("meta_action_task") or {}).get("cot_for_training"))
+    return [t.strip() for t in out if t and t.strip()]
+
+
+def synthesize_text(sources: Sequence[str], n_tokens: int,
+                    encode: Callable[[str], list[int]],
+                    decode: Callable[[Sequence[int]], str]) -> str:
+    """Placeholder CoC of n_tokens tokens: real CoC sentences tiled, cut at n_tokens ids."""
+    if n_tokens <= 0 or not sources:
+        raise ValueError("synthesize_text needs n_tokens > 0 and at least one source text")
+    text = ""
+    while len(encode(text)) < n_tokens:
+        text = (text + " " + " ".join(sources)).strip()
+    return decode(encode(text)[:n_tokens]).strip()
+
+
+def choose_cot(cot_text: Optional[str], block1: Optional[dict], references: Sequence[str],
+               encode: Callable[[str], list[int]],
+               decode: Callable[[Sequence[int]], str]) -> dict[str, Any]:
+    """
+    The CoC put in the training example, and where it comes from. Priority:
+      1. --cot-text (kind "user");
+      2. block 1's own generation, summary.cot_for_training (kind "real");
+      3. otherwise a placeholder (kind "synthetic") whose token length is the MAX of a real
+         distribution — block 1's CoCs if any, else the afh A2 fixture CoCs — max because the
+         probe measures memory and must not under-estimate it.
+    Always records the measured token length of the text actually used.
+    """
+    info: dict[str, Any]
+    if cot_text and cot_text.strip():
+        info = {"kind": "user", "source": "--cot-text", "text": cot_text.strip()}
+    elif block1 and ((block1.get("summary") or {}).get("cot_for_training") or "").strip():
+        s = block1["summary"]
+        info = {"kind": "real", "text": s["cot_for_training"].strip(),
+                "source": f"block 1 generation, run 0 ({s.get('cot_source')})"}
+    else:
+        b1 = block1_cots(block1)
+        dist_texts, dist_name = (b1, "block1_cots") if b1 else (list(references), "afh_fixture_a2_cots")
+        if not dist_texts:
+            raise ValueError("no CoC: block 1 produced none and no reference CoC was found")
+        lengths = [len(encode(t)) for t in dist_texts]
+        target = max(lengths)
+        info = {"kind": "synthetic", "text": synthesize_text(dist_texts, target, encode, decode),
+                "source": f"placeholder tiled from {dist_name}",
+                "length_distribution": {"name": dist_name, "token_lengths": lengths,
+                                        "statistic": "max", "target_tokens": target}}
+    info["tokens"] = len(encode(info["text"]))
+    info["words"] = len(info["text"].split())
+    return info
 
 
 # --------------------------------------------------------------------------- output

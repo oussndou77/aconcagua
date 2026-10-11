@@ -11,7 +11,24 @@ Training path = NVlabs/alpamayo-recipes recipes/alpamayo2_sft (#39), used as is:
     model(tokenized_data, traj_data, labels_mask) -> loss, future_traj_ce, others_ce
 The sample comes from the recipe's PhysicalAIDataset when --pai-dir is given; otherwise from the
 same release loader the dataset calls (load_physical_aiavdataset, streamed), with the dataset's
-own post-processing (ego tensors squeezed). The CoC of the example is read from block 1's JSON.
+own post-processing (ego tensors squeezed).
+
+Where the CoC comes from (probe_common.choose_cot, recorded under training_path.cot):
+  1. --cot-text if given;
+  2. otherwise the CoC the model itself generated in block 1 (summary.cot_for_training of
+     the block-1 JSON) — a real CoC, the normal case;
+  3. otherwise, and only then, a placeholder built from real CoC sentences, whose length in
+     tokens is the maximum of a real distribution: block 1's CoCs if it produced any, else the
+     Alpamayo 2 Super CoCs of the afh fixtures (--cot-reference). The distribution, the
+     statistic and the measured token length are written in the JSON.
+
+The real sequence length (before padding) is measured right after preprocessing. Above the
+recipe's max_length (6 144) the probe raises SequenceTooLong and stops: it never truncates,
+and it does not shrink the input to make a too-long sequence fit. After collation it checks
+that the padded batch still holds every real token.
+
+GPU: block 2 needs an H200 (141 GB) or larger; the probe refuses a GPU under 120 GiB unless
+--allow-small-gpu is passed, and records it (such a run does not count for D-014).
 
 Three deliberate departures from the recipe, all stated in the JSON:
   1. one GPU, no DeepSpeed: the 34B model sits whole on cuda:0 (the recipe shards it with ZeRO-3
@@ -26,9 +43,9 @@ tokens, CoC tokens, assistant-mask tokens and its first tokens (training format 
 D-008), losses, q_proj gradient norms, and torch.cuda.max_memory_allocated / memory_allocated
 after load, after the forward and after the backward.
 
-On OOM (or a sequence longer than the collator's max_length) it frees memory and retries with
-fewer cameras, then fewer frames (probe_common.FALLBACK_CONFIGS), and reports the configuration
-that passes. Any other error stops the probe with its message: a bug is not a memory number.
+On OOM it frees memory and retries with fewer cameras, then fewer frames
+(probe_common.FALLBACK_CONFIGS), and reports the configuration that passes. Any other error,
+including a too-long sequence, stops the probe with its message.
 The JSON is rewritten after every step, so a crash still leaves a measurement.
 
 Usage (recipe venv, see docs/gpu_session_01.md block 0):
@@ -58,8 +75,11 @@ from runners.probe_common import (  # noqa: E402
     DEFAULT_T0_US,
     FALLBACK_CONFIGS,
     InputConfig,
+    check_sequence_length,
+    choose_cot,
     count_span,
     package_provenance,
+    reference_cots,
     run_with_fallback,
     select_last_layer_modules,
     write_json,
@@ -68,23 +88,35 @@ from runners.probe_common import (  # noqa: E402
 COMPONENTS_WITH_COT = ["image", "traj_history", "prompt", "cot", "traj_future"]
 COMPONENTS_RECIPE = ["image", "traj_history", "prompt", "traj_future"]   # trajectory.yaml:2
 RECIPE_MAX_LENGTH = 6144                                                 # sft_base.yaml:46
+MIN_GPU_GIB = 120.0          # H200 = ~140 GiB usable; H100 80 GB (~79 GiB) is refused for block 2
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_COT_REFERENCE = REPO_ROOT / ".deps/alpamayo-faithfulness/fixtures/records_a2.json"
 
 
 def gib(x: int) -> float:
     return round(x / 2**30, 3)
 
 
-def read_cot(tokens_json: str | None, cot_text: str | None) -> tuple[str | None, str]:
-    """CoC for the example: --cot-text, else block 1's summary.cot_for_training."""
-    if cot_text:
-        return cot_text, "--cot-text"
-    if tokens_json:
+def read_block1(tokens_json: str | None) -> tuple[dict | None, str]:
+    """Block-1 JSON if readable, with a note on why not otherwise."""
+    if not tokens_json:
+        return None, "no --tokens-json"
+    try:
         with open(tokens_json) as fh:
-            summary = json.load(fh).get("summary") or {}
-        cot = summary.get("cot_for_training")
-        if cot:
-            return cot, f"{tokens_json}:summary.cot_for_training ({summary.get('cot_source')})"
-    return None, "none"
+            return json.load(fh), tokens_json
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"unreadable {tokens_json}: {type(exc).__name__}"
+
+
+def gpu_gate(total_gib: float, allow_small: bool) -> dict:
+    """Block 2 needs >= MIN_GPU_GIB; below that, refuse unless explicitly overridden."""
+    ok = total_gib >= MIN_GPU_GIB
+    if not ok and not allow_small:
+        raise SystemExit(f"block 2 requires an H200 (>= {MIN_GPU_GIB:.0f} GiB); this GPU has "
+                         f"{total_gib:.1f} GiB. Run blocks 1, 3, 4 here and block 2 on an H200, "
+                         "or pass --allow-small-gpu (the run will not count for D-014).")
+    return {"min_gib": MIN_GPU_GIB, "total_gib": total_gib, "meets_requirement": ok,
+            "overridden": (not ok) and allow_small}
 
 
 def load_source_sample(args) -> tuple[dict, str]:
@@ -113,6 +145,10 @@ def main(argv: list[str] | None = None) -> dict:
     ap.add_argument("--tokens-json", default="outputs/session01/tokens_a2_0ea6fd88.json",
                     help="block 1 output; its summary.cot_for_training is the example's CoC")
     ap.add_argument("--cot-text", default=None, help="override the CoC text")
+    ap.add_argument("--cot-reference", default=str(DEFAULT_COT_REFERENCE),
+                    help="afh fixture with real A2 CoCs, used only if block 1 gave no CoC")
+    ap.add_argument("--allow-small-gpu", action="store_true",
+                    help="run under 120 GiB anyway (recorded; does not count for D-014)")
     ap.add_argument("--no-cot", action="store_true", help="recipe's shipped trajectory-only targets")
     ap.add_argument("--pai-dir", default=None, help="local PAI root: use the recipe's PhysicalAIDataset")
     ap.add_argument("--chunk-ids", default=None, help="with --pai-dir, e.g. '0-1'")
@@ -128,10 +164,8 @@ def main(argv: list[str] | None = None) -> dict:
     args = ap.parse_args(argv)
     out = args.out
 
-    cot, cot_source = (None, "disabled (--no-cot)") if args.no_cot else read_cot(args.tokens_json, args.cot_text)
-    if not args.no_cot and not cot:
-        raise SystemExit("no CoC: run block 1 first (--tokens-json) or pass --cot-text / --no-cot")
     components = COMPONENTS_RECIPE if args.no_cot else COMPONENTS_WITH_COT
+    block1, block1_note = (None, "not used (--no-cot)") if args.no_cot else read_block1(args.tokens_json)
 
     payload: dict[str, Any] = {
         "probe": "probe_train_memory_a2", "clip_id": args.clip, "t0_us": args.t0_us,
@@ -140,7 +174,8 @@ def main(argv: list[str] | None = None) -> dict:
             "model": "alpamayo2_sft.models.trainable_alpamayo2_super.TrainableAlpamayo2Super (training_stage=vlm)",
             "preprocess": "alpamayo2_sft.processor.Alpamayo2SuperProcessor.preprocess",
             "collator": "alpamayo2_sft.processor.Alpamayo2SuperCollator",
-            "components_order": components, "cot": cot, "cot_source": cot_source,
+            "components_order": components, "block1_json": block1_note,
+            "cot": None,          # filled once the tokenizer is loaded (probe_common.choose_cot)
             "departures_from_recipe": [
                 "single GPU, no DeepSpeed ZeRO-3 (recipe: 4 x 8 H100)",
                 f"gradients only on q_proj of the last {args.n_last_layers} LM layers (recipe: whole VLM)",
@@ -166,6 +201,12 @@ def main(argv: list[str] | None = None) -> dict:
         raise SystemExit("CUDA GPU required")
     prop = torch.cuda.get_device_properties(0)
     payload["env"]["gpu"] = {"name": prop.name, "total_memory_gib": gib(prop.total_memory)}
+    try:
+        payload["env"]["gpu_requirement"] = gpu_gate(gib(prop.total_memory), args.allow_small_gpu)
+    except SystemExit as exc:
+        payload["steps"]["gpu_requirement"] = {"status": "refused", "error": str(exc)}
+        write_json(out, payload)
+        raise
 
     from alpamayo2_sft.models.trainable_alpamayo2_super import TrainableAlpamayo2Super
     from alpamayo2_sft.processor import Alpamayo2SuperCollator, Alpamayo2SuperProcessor
@@ -212,9 +253,18 @@ def main(argv: list[str] | None = None) -> dict:
     t = time.time()
     try:
         source, source_desc = load_source_sample(args)
-        if cot is not None:
-            source["cot"] = cot
         processor = Alpamayo2SuperProcessor(model.config)
+        if not args.no_cot:
+            tk = processor.processor.tokenizer
+            refs = reference_cots(args.cot_reference) if os.path.isfile(args.cot_reference) else []
+            cot_info = choose_cot(args.cot_text, block1, refs,
+                                  encode=lambda t: tk.encode(t, add_special_tokens=False),
+                                  decode=lambda ids: tk.decode(list(ids), skip_special_tokens=False))
+            cot_info["reference_file"] = args.cot_reference if refs else None
+            payload["training_path"]["cot"] = cot_info
+            source["cot"] = cot_info["text"]
+            print(f"[cot] {cot_info['kind']} ({cot_info['source']}), {cot_info['tokens']} tokens: "
+                  f"{cot_info['text'][:100]!r}")
         collator = Alpamayo2SuperCollator(model.config, max_length=args.max_length,
                                           pad_to_fixed_length=not args.no_fixed_padding)
         payload["steps"]["load_data"] = {"status": "ok", "seconds": round(time.time() - t, 1),
@@ -244,12 +294,22 @@ def main(argv: list[str] | None = None) -> dict:
         sample["tokenized_data"] = processor.preprocess(
             data=sample, components_order=components, components_prompt=components[3:],
             label_components=components[3:], generation_mode=False)
+        unpadded = sample["tokenized_data"]["input_ids"][0]
+        steps["sequence_before_padding"] = {
+            "real_len": int(unpadded.shape[0]), "max_length": args.max_length,
+            "visual_tokens": int((unpadded == image_token_id).sum()),
+        }
+        steps["_current"] = "length_check"
+        check_sequence_length(int(unpadded.shape[0]), args.max_length)   # no truncation, ever
         steps["_current"] = "collate"
         batch = collator([sample])
         input_ids = batch["tokenized_data"]["input_ids"][0]
         attn = batch["tokenized_data"]["attention_mask"][0]
         mask = batch["labels_mask"][0]
         real = input_ids[attn.bool()].tolist()
+        if real != unpadded.tolist():
+            raise RuntimeError(f"collated batch lost tokens: {len(real)} real tokens after padding, "
+                               f"{int(unpadded.shape[0])} before (truncation or reordering)")
         n_visual = int((input_ids == image_token_id).sum())
         assistant_ids = input_ids[mask].tolist()
         steps["sequence"] = {
@@ -319,7 +379,8 @@ def summarize(result: dict, load_step: dict) -> dict:
         s = a["steps"]
         rows.append({
             "config": a["config"]["name"], "status": a["status"], "failed_step": a["failed_step"],
-            "real_len": (s.get("sequence") or {}).get("real_len"),
+            "real_len": ((s.get("sequence_before_padding") or {}).get("real_len")
+                         or (s.get("sequence") or {}).get("real_len")),
             "visual_share": (s.get("sequence") or {}).get("visual_share_of_real"),
             "peak_forward_gib": (s.get("forward") or {}).get("max_memory_allocated_gib"),
             "peak_backward_gib": (s.get("backward") or {}).get("max_memory_allocated_gib"),

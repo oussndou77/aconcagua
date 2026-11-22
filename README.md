@@ -57,8 +57,10 @@ Four probes, all in the environment of the official recipe (`uv sync --locked` i
 | Runner | Block | What it records |
 |---|---|---|
 | `runners/probe_tokens_edge.py` | 1 | raw generation of the release path: first tokens, where the trajectory anchor is, length of the reasoning before it (zero included), trajectories |
-| `runners/probe_blackout_edge.py` | 2 | the same with every camera black, then the front camera only, and the trajectory deviation from the clean run |
+| `runners/probe_blackout_edge.py` | 2 | the same with every camera black, then both forward cameras, then the front wide camera only, and the trajectory deviation from the clean run |
 | `runners/probe_nav_edge.py` | 3 | the same with the navigation instruction changed (mirrored, then "Continue straight"), validated by the recipe's own validator |
 | `runners/probe_train_memory_edge.py` | 4 | one full joint training step through the recipe's model, processor and collator on one GPU: real sequence length, peak memory, seconds per step, with the same record-then-fall-back logic as the 2 Super probe and no truncation |
 
 `runners/probe_edge_common.py` holds their shared logic; its torch-free half is tested cold.
+The Edge probes write their JSON through `write_probe_json`, which refuses dataset ground truth
+(ego poses, logged futures, scores against them): see "Ce qui est publiable" in `docs/gpu_session_02.md`.

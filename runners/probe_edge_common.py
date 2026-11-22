@@ -79,11 +79,13 @@ EDGE_CAMERA_NAMES = {
 EDGE_CAMERA_FRAME_COUNTS = {0: 3, 1: 5, 2: 3, 3: 3, 5: 3, 6: 5}
 EDGE_PIXEL_BOUNDS = {cam: (163840, 196608) if cam in (1, 6) else (81920, 98304)
                      for cam in EDGE_CAMERA_FRAME_COUNTS}
-FRONT_WIDE_CAMERA = 1
+FRONT_WIDE_CAMERA, FRONT_TELE_CAMERA = 1, 6
 
+# Run in this order: from no camera at all to a single camera missing.
 BLACKOUT_CONDITIONS = {
-    "blackout_all": tuple(EDGE_CAMERA_FRAME_COUNTS),     # every camera, every frame
-    "blackout_front": (FRONT_WIDE_CAMERA,),              # front wide only; telephoto stays
+    "blackout_all": tuple(EDGE_CAMERA_FRAME_COUNTS),                  # every camera, every frame
+    "blackout_front_both": (FRONT_WIDE_CAMERA, FRONT_TELE_CAMERA),    # both forward cameras
+    "blackout_front": (FRONT_WIDE_CAMERA,),                           # front wide only; telephoto stays
 }
 
 
@@ -451,6 +453,45 @@ def deviation(base: Any, cond: Any) -> dict[str, Any]:
     return out
 
 
+# --------------------------------------------------------------------------- what a probe may write
+
+# Dataset ground truth never goes into a probe JSON (docs/gpu_session_02.md, "Ce qui est
+# publiable"): no ego pose from the dataset, past or future, and no score computed against
+# the logged future. The probes write model outputs and measurements about the run.
+# Keys are matched whole or by prefix after lower-casing; the guard walks the whole payload.
+_FORBIDDEN_KEY_RE = re.compile(
+    r"^(ego_(future|history)_(xyz|rot).*|future_(end_)?(xyz|rot|pose).*|gt_.*|.*ground_truth.*"
+    r"|logged_future.*|.*_vs_logged_future.*|min_ade.*|eval_min_ade.*|(m|f)?ade_vs_(gt|truth).*)$")
+
+
+class GroundTruthInPayload(ValueError):
+    """A probe tried to write dataset ground truth, or a score against it, to its JSON."""
+
+
+def forbidden_keys(payload: Any, path: str = "") -> list[str]:
+    """Paths of every key of a nested payload that names dataset ground truth."""
+    found: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            here = f"{path}.{key}" if path else str(key)
+            if _FORBIDDEN_KEY_RE.match(str(key).lower()):
+                found.append(here)
+            found += forbidden_keys(value, here)
+    elif isinstance(payload, (list, tuple)):
+        for i, value in enumerate(payload):
+            found += forbidden_keys(value, f"{path}[{i}]")
+    return found
+
+
+def write_probe_json(path: str, payload: dict) -> None:
+    """The only way an Edge probe writes its JSON: refuse ground-truth keys, then write
+    atomically. A refusal is a bug in the probe, never something to work around."""
+    bad = forbidden_keys(payload)
+    if bad:
+        raise GroundTruthInPayload(f"refusing to write dataset ground truth to {path}: {bad[:5]}")
+    write_json(path, payload)
+
+
 # --------------------------------------------------------------------------- GPU gate
 
 def gpu_gate(total_gib: Optional[float], min_gib: float, allow_small: bool) -> dict[str, Any]:
@@ -516,7 +557,7 @@ def step(payload: dict, name: str, out: str, fn: Callable[[], Any]) -> Any:
         print(f"[{name}] FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise
     finally:
-        write_json(out, payload)
+        write_probe_json(out, payload)
 
 
 def token_report(model) -> dict[str, Any]:
@@ -601,14 +642,22 @@ def with_navigation(sample: dict, nav_text: str) -> dict:
 
 
 def prompt_report(prompt_ids: list[int], model, tail: int = 16) -> dict[str, Any]:
+    """End of the prompt as the model received it. The prompt carries the ego history as
+    discrete tokens; those are dataset data, so any of them falling in the reported tail is
+    withheld (the tail normally holds the task sentence and the assistant header only)."""
     tok = model.tokenizer
     image_id = int(model.config.vlm_config.image_token_id)
-    tail_ids = prompt_ids[-tail:]
-    tail_text = tok.decode(tail_ids, skip_special_tokens=False)
+    h0 = int(model.config.traj_ids["history_id0"])
+    h1 = h0 + int(getattr(model.config, "history_vocab_size", HISTORY_VOCAB))
+    raw_tail = prompt_ids[-tail:]
+    withheld = sum(1 for t in raw_tail if h0 <= t < h1)
+    kept = [t for t in raw_tail if not h0 <= t < h1]
+    tail_text = tok.decode(kept, skip_special_tokens=False)
     return {"prompt_len": len(prompt_ids),
             "n_image_tokens": sum(1 for t in prompt_ids if t == image_id),
-            "tail_ids": tail_ids, "tail_tokens": tok.convert_ids_to_tokens(tail_ids),
-            "tail_text": tail_text, "ends_with_closed_thinking": tail_text.endswith(CLOSED_THINKING)}
+            "tail_ids": kept, "tail_tokens": tok.convert_ids_to_tokens(kept),
+            "tail_text": tail_text, "history_tokens_withheld_from_tail": withheld,
+            "ends_with_closed_thinking": tail_text.endswith(CLOSED_THINKING)}
 
 
 def _analyze_rows(call: dict, model, first_n: int) -> list[dict]:
@@ -780,7 +829,7 @@ def open_session(args, probe: str) -> tuple[dict, Any, GenerateRecorder, Any, li
     payload["env"] = step(payload, "env", out, env_report)
     if not torch.cuda.is_available():
         payload["steps"]["env"]["error"] = "no CUDA device"
-        write_json(out, payload)
+        write_probe_json(out, payload)
         raise SystemExit("CUDA GPU required")
     model, loading_info = step(payload, "load_model", out,
                                lambda: load_edge_model(args.model_id, args.revision))
@@ -794,7 +843,7 @@ def open_session(args, probe: str) -> tuple[dict, Any, GenerateRecorder, Any, li
     recorder = GenerateRecorder(model.vlm.generate)
     model.vlm.generate = recorder
     avdi = step(payload, "dataset_interface", out, lambda: make_dataset_interface(args.pai_revision))
-    write_json(out, payload)
+    write_probe_json(out, payload)
     return payload, model, recorder, avdi, events
 
 

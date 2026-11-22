@@ -17,12 +17,12 @@
 
 | Élément | Choix | Pourquoi |
 |---|---|---|
-| GPU | **1 × 80 Go** (A100 80 Go ou H100 80 Go) | l'inférence d'Edge tient dans 12 Gio selon la fiche ; c'est le bloc 4 qui demande 80 Go. La sonde mémoire refuse un GPU de moins de 75 Gio |
+| GPU | **1 × H100 80 Go, recommandé** ; A100 80 Go en repli | le H100 80 Go est le seul GPU que NVIDIA déclare testé pour Edge. L'inférence tient dans 12 Gio selon la fiche ; c'est le bloc 4 qui demande 80 Go. La sonde mémoire refuse un GPU de moins de 75 Gio |
 | Disque | disque conteneur de 100 Go | environnement de la recette, modèle (5,3 Go), cache des 19 échantillons (environ 3 Go), un morceau de PAI pour le bloc 5 (de l'ordre de 7 Go : la recette annonce 181 Gio pour 26 morceaux) |
 | CPU / RAM | ≥ 8 vCPU, ≥ 48 Go | le bloc 4 charge le modèle en FP32 sur CPU (environ 10 Go) avant de le passer au GPU |
 | Durée visée | **3 h** GPU, clôture comprise | blocs en série ; le bloc 5 saute si le temps manque |
 
-NVIDIA ne déclare testé que le H100 80 Go (fiche du modèle). Sur A100, tout fonctionne en principe (BF16 pris en charge), mais ce n'est pas une configuration validée par NVIDIA : chaque sonde enregistre le GPU et `bf16_supported` dans `env.gpu`.
+Sur A100 80 Go, tout fonctionne en principe (BF16 pris en charge), mais ce n'est pas une configuration validée par NVIDIA : une différence de sortie avec un H100 ne serait pas une anomalie de nos sondes. Chaque sonde enregistre le GPU et `bf16_supported` dans `env.gpu`.
 
 | Bloc | Contenu | Durée visée | Inconnues |
 |---|---|---|---|
@@ -105,14 +105,27 @@ PY
 python -m alpamayo2_edge.inference --help | head -3
 python -c "import json; print(len(json.load(open('$EVENTS'))), 'événements')"      # 19
 
-# 0.6 Modèle : téléchargement fini, fichiers identiques à ceux lus dans la revue
+# 0.6 Contrôle d'API contre les sources réellement installées (9 tests, aucun ne doit être sauté)
+cd $ACONCAGUA
+EDGE_INSTALLED=1 RECIPES_REPO=$REPO_DIR python -m pytest tests/test_edge_pinned_api_cold.py \
+    -q -rs --fail-on-skip > $OUT/api_check.log 2>&1 \
+  && tail -1 $OUT/api_check.log \
+  || { tail -25 $OUT/api_check.log; echo "CONTRÔLE D'API ÉCHOUÉ OU INCOMPLET : ne pas lancer les blocs"; false; }
+
+# 0.7 Modèle : téléchargement fini, fichiers identiques à ceux lus dans la revue
 tail -2 $WS/model_download.log && ls $EDGE_MODEL
 for f in config.json chat_template.jinja generation_config.json; do
   cmp $EDGE_MODEL/$f $ACONCAGUA/docs/configs/alpamayo2-edge/$f && echo "$f identique à f8951d0"
 done
 ```
 
-**À noter dans le gabarit.** GPU, pilote, version de `nvcc`, durée de `uv sync`, résultat des trois `cmp`. Un `cmp` qui échoue veut dire que la revue a lu une autre révision que celle téléchargée : s'arrêter et le signaler.
+**Le contrôle d'API (0.6).** Les sondes n'ont jamais tourné : elles ont été vérifiées à froid contre des clones épinglés. Ce contrôle refait la même vérification contre ce que les sondes vont réellement importer sur le pod : le paquet `alpamayo2_edge` installé dans le venv (commit lu dans son enregistrement d'installation) et la recette de `$REPO_DIR`. Il vérifie chaque fonction appelée et ses arguments, les constantes recopiées, les valeurs des configs, les 38 instructions de navigation contre le validateur, et que les paquets `alpamayo2edge_sft` et `alpamayo` du venv viennent bien de `$REPO_DIR`.
+
+- Résultat attendu : `9 passed`, rien d'autre.
+- `--fail-on-skip` fait échouer la commande dès qu'un seul test est sauté : un contrôle qui n'a pas tourné ne doit pas ressembler à un contrôle réussi.
+- En cas d'échec, ne pas lancer les blocs : lire `$OUT/api_check.log`, noter le test et le message, et s'arrêter là. Un échec veut dire que le code installé n'est pas celui que les sondes attendent.
+
+**À noter dans le gabarit.** GPU, pilote, version de `nvcc`, durée de `uv sync`, la dernière ligne de `api_check.log`, résultat des trois `cmp`. Un `cmp` qui échoue veut dire que la revue a lu une autre révision que celle téléchargée : s'arrêter et le signaler.
 
 **Si `uv sync` échoue** sur un téléchargement : relancer la même commande (le cache `UV_CACHE_DIR` reprend). S'il échoue à la compilation d'un paquet, noter le paquet et le message ; ne pas remplacer le verrou.
 
@@ -156,18 +169,21 @@ python runners/probe_blackout_edge.py --events $EVENTS --model-id $EDGE_MODEL \
     --out $OUT/blackout_edge.json 2>&1 | tee $OUT/blackout_edge.log
 ```
 
-Deux conditions, sur les mêmes événements, la même graine et le même chemin que le bloc 1 :
+Trois conditions, dans cet ordre, sur les mêmes événements, la même graine et le même chemin que le bloc 1 :
 
-| Condition | Images noircies |
-|---|---|
-| `blackout_all` | les 22 images, toutes caméras |
-| `blackout_front` | les 5 images de la caméra frontale grand angle (identifiant 1) ; le téléobjectif avant reste |
+| Condition | Images noircies | Ce qui reste |
+|---|---|---|
+| `blackout_all` | les 22 images, toutes caméras | rien |
+| `blackout_front_both` | les 10 images des deux caméras avant : grand angle (identifiant 1) et téléobjectif (identifiant 6) | les 12 images des caméras latérales et arrière |
+| `blackout_front` | les 5 images de la caméra frontale grand angle (identifiant 1) | le téléobjectif avant et les quatre autres caméras |
+
+`blackout_front_both` sépare deux lectures de `blackout_front` : si le modèle conduit encore normalement sans le grand angle, est-ce parce qu'il se passe de la vue avant, ou parce que le téléobjectif la remplace ?
 
 Les images sont choisies par identifiant de caméra sur la liste à plat d'Edge. `afh.degradation` n'est pas utilisé : il suppose un tenseur caméras × temps (mise à jour de D-010).
 
 **Ce que la sonde ajoute aux sorties du bloc 1** (`conditions.<condition>.deviation_vs_clean`) : la distance entre les trajectoires moyennes, la distance appariée candidat par candidat (même graine), et la dispersion entre candidats du run propre, qui sert de plancher. `exceeds_baseline_spread` dit seulement si l'écart dépasse ce plancher. Les CoC propres et noircies sont gardées côte à côte, mot pour mot ; la sonde ne les note pas.
 
-**À noter.** Par condition : `n_exceeding_clean_spread` sur `n_compared_with_spread`, `mean_ade_between_means_m` contre `mean_clean_within_spread_m`, les longueurs de parcours propre et noircie (le modèle ralentit-il ?), et cinq paires de CoC mot pour mot. Lire les CoC de `blackout_all` : parlent-elles de feux, de véhicules, de voie libre ?
+**À noter.** Pour chacune des trois conditions : `n_exceeding_clean_spread` sur `n_compared_with_spread`, `mean_ade_between_means_m` contre `mean_clean_within_spread_m`, les longueurs de parcours propre et noircie (le modèle ralentit-il ?), et cinq paires de CoC mot pour mot. Lire les CoC de `blackout_all` et de `blackout_front_both` : parlent-elles de feux, de véhicules, de voie libre devant ?
 
 ---
 
@@ -221,6 +237,8 @@ python runners/probe_train_memory_edge.py --events $EVENTS --model-dir $EDGE_MOD
 
 **Règle de décision (D-004).** `summary.native_full_finetune_fits` vrai sur un GPU de 80 Go, sans `--allow-small-gpu` : pas de LoRA en W1. Faux : D-004 est rouverte pour Edge, avec le pic atteint et la configuration qui passe comme entrées. `--allow-small-gpu` existe pour déboguer sur un plus petit GPU ; la mesure obtenue ne compte pas pour D-004.
 
+**Vérité terrain.** La trajectoire future de l'exemple sert à calculer la perte et rien d'autre : aucune pose n'est écrite dans le JSON (`example.target_trajectory.values_written` vaut `false`). Les pertes sont des chiffres calculés contre cette trajectoire : elles servent à vérifier que le pas est sain, et ne sont pas publiables (voir « Ce qui est publiable »).
+
 **À noter.** Le tableau des tentatives, `summary.weights_gib`, les trois pics du premier pas de la configuration retenue, `seconds_per_step`, et `recipe.preprocess_matches_pinned_copy`.
 
 ---
@@ -249,25 +267,57 @@ CUDA_VISIBLE_DEVICES=0 python -m alpamayo2edge_sft.evaluate_hf \
 
 Un seul morceau de validation officielle (`1134-1135` est un intervalle semi-ouvert : le morceau 1134), pour tenir sur le disque ; la recette en évalue onze. La config `sft_eval_trajectory` est celle par défaut : prompt trajectoire seule, sans navigation ni CoC générée, 6 candidats, minADE en XY sur 6,4 s. **Ce n'est pas le prompt natif** : la variante native (`sft_eval_trajectory_nav_cot`) demande des annotations de navigation que nous n'avons pas pour ces clips. Le chiffre obtenu ne se compare ni au 0,52 m de la fiche (horizon 5 s, 1 392 échantillons) ni à un minADE d'`afh`.
 
+**Non publiable.** Ce minADE est un chiffre de benchmark contre la vérité terrain de PAI : il reste privé jusqu'à la réponse de NVIDIA (D-012), comme tout le dossier `eval_base`.
+
 **À noter.** Dans le sous-dossier créé sous `$OUT/eval_base` : `trajectory_summary.json` (`eval_min_ade`, `eval_samples`, `eval_generation_coverage`), `evaluation_protocol.json` (`prompt_format`, `native_release_prompt`, `candidate_count`), le pic mémoire journalisé, et la durée. Si le téléchargement demande une confirmation de taille, l'accepter et noter la taille.
 
 ---
 
 ## Clôture (15 min)
 
+La séance ne publie rien : pas de commit, pas de branche, pas de `git push` depuis le pod. Elle produit une archive, à rapatrier **avant** d'arrêter le pod (le disque conteneur disparaît avec lui).
+
 ```bash
-cd $ACONCAGUA
-SESSION=docs/observations/$(date +%Y-%m-%d)-session02
-mkdir -p $SESSION && cp docs/observations/TEMPLATE-session02.md $SESSION/README.md
-cp $OUT/*.json $OUT/*.log $SESSION/ 2>/dev/null
-cp -r $OUT/eval_base $SESSION/ 2>/dev/null
+cd $WS
 tar czf $WS/session02_outputs.tgz -C $OUT --exclude=samples .
-git checkout -b observations/session02 && git add $SESSION && git commit -m "GPU session 02 observations"
-git push -u origin observations/session02
-nvidia-smi    # puis arrêter le pod
+tar tzf $WS/session02_outputs.tgz | grep -c "samples/" ; ls -lh $WS/session02_outputs.tgz    # 0, puis la taille
+runpodctl send $WS/session02_outputs.tgz      # affiche un code ; `runpodctl receive <code>` sur ta machine
+nvidia-smi                                    # arrêter le pod seulement une fois l'archive reçue et ouverte
 ```
 
-Le cache des échantillons (`$OUT/samples`, environ 3 Go d'images) ne va pas dans le dépôt. Remplir `$SESSION/README.md` rubrique par rubrique, à partir des JSON uniquement. D-004, D-016 et le tableau des inconnues se mettent à jour ensuite, dans une PR séparée, à partir de ce dossier.
+Sans `runpodctl`, télécharger `session02_outputs.tgz` par l'explorateur de fichiers du pod ou par `scp`. Vérifier sur ta machine que l'archive s'ouvre et contient les quatre JSON des sondes avant d'arrêter le pod.
+
+**Contenu de l'archive.** Les JSON et journaux des blocs 0 à 4, et le dossier `eval_base` du bloc 5. Le cache `$OUT/samples` en est exclu : il contient les images de PAI et les poses futures de l'exemple du bloc 4, qui ne quittent pas le pod.
+
+**Ensuite, hors du pod.** Remplir une copie de `docs/observations/TEMPLATE-session02.md` à partir des JSON uniquement. Ce qui entre dans le dépôt se décide avec la section suivante. D-004, D-016 et le tableau des inconnues se mettent à jour dans une PR séparée.
+
+---
+
+## Ce qui est publiable
+
+L'archive est privée dans son ensemble. Avant de publier quoi que ce soit (dépôt, issue, message à NVIDIA), trier ainsi :
+
+| Publiable : sorties du modèle et mesures de la séance | Non publiable jusqu'à la réponse de NVIDIA (D-012) |
+|---|---|
+| Les CoC générées, mot pour mot, propres et sous condition | Tout chiffre de benchmark contre la vérité terrain de PAI, dont le minADE du bloc 5 et tout le dossier `eval_base` |
+| Les trajectoires prédites (`pred_xyz`) et leurs résumés | Toute vérité terrain du dataset : poses d'ego passées ou futures, trajectoires enregistrées |
+| Les écarts entre conditions (blackout, navigation) et la dispersion entre candidats : ce sont des distances entre sorties du modèle | Les images de PAI et le cache `samples/` |
+| Les longueurs de raisonnement, les jetons générés, les longueurs de séquence | Les pertes du bloc 4 (`loss`, `vlm_ce`, `future_traj_ce`, `others_ce`, `expert_diffusion`) : elles sont calculées contre la trajectoire vraie |
+| La mémoire et les temps (blocs 1 à 4), l'environnement, les commits | |
+
+Les pertes du bloc 4 sont classées non publiables par prudence : ce ne sont pas des chiffres de benchmark, mais elles dépendent de la vérité terrain. À confirmer par Ousseynou.
+
+D-012 n'a pas encore d'entrée dans `docs/DECISIONS.md` ; cette section s'y réfère telle qu'Ousseynou l'a énoncée.
+
+**Ce que les sondes garantissent.**
+
+- Elles n'écrivent leur JSON que par `write_probe_json`, qui refuse toute clé nommant une vérité terrain (pose d'ego, futur enregistré, score contre le futur enregistré).
+- Aucune pose n'est écrite : ni l'histoire d'ego, ni le futur. Les jetons d'histoire que contiendrait la fin du prompt rapportée sont retirés (`history_tokens_withheld_from_tail`).
+- Les blocs 1 à 3 ne chargent aucun futur : leurs écarts comparent des sorties du modèle entre elles.
+- Le bloc 4 charge le futur de son exemple pour la perte, et n'en écrit que le nombre de points.
+- Ces garanties sont couvertes par les tests à froid (`tests/test_probes_edge_cold.py`).
+
+Ce que les JSON contiennent du dataset sans être une vérité terrain : les identifiants de clip, les instants `t0`, les décalages de capture des images. Les instructions de navigation et la CoC de l'exemple viennent de l'asset public de la recette, pas de PAI.
 
 ---
 
@@ -277,6 +327,7 @@ Le cache des échantillons (`$OUT/samples`, environ 3 Go d'images) ne va pas dan
 - **Pas de notation des CoC par `afh`.** Les textes sont gardés mot pour mot ; les axes du harnais s'appliqueront quand le runner existera.
 - **Pas de LoRA**, et pas d'entraînement au-delà de trois pas de mesure.
 - **Pas d'évaluation au prompt natif** dans le bloc 5, faute d'annotations de navigation sur les clips de validation.
+- **Pas de publication.** Ni commit ni `git push` depuis le pod ; l'archive est rapatriée, puis triée selon « Ce qui est publiable ».
 
 ## Tâche suivante : un runner Edge dans `alpamayo-faithfulness`
 

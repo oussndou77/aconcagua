@@ -8,9 +8,20 @@ them under .deps/) and verifies, with `ast`, that each function exists with the 
 the probes pass, that the constants the probes copy are the pinned ones, and that the
 commands of the session document use options the pinned scripts and configs define.
 
-It skips when the checkouts are absent. The one file it executes is the recipe's
-`src/alpamayo/data/pai_metadata.py`, which declares itself dependency-free: the navigation
-counterfactuals of block 3 go through the recipe's own validator.
+Two sources for the inference package:
+  * default — the pinned git checkout under .deps/ (commit read from git). The tests skip
+    when the checkouts are absent;
+  * EDGE_INSTALLED=1 — the `alpamayo2_edge` package installed in the current environment,
+    i.e. what the probes will actually import on the pod (commit read from the PEP 610
+    record uv writes), with RECIPES_REPO pointing at the recipe checkout the environment was
+    synced from. Nothing skips in that mode: a missing source is a failure. Block 0 of
+    docs/gpu_session_02.md runs it with --fail-on-skip.
+The two assertions that need the inference repository root (README, pyproject) are replaced
+in installed mode by the installed metadata and by the location of the recipe packages.
+
+The one file it executes is the recipe's `src/alpamayo/data/pai_metadata.py`, which declares
+itself dependency-free: the navigation counterfactuals of block 3 go through the recipe's
+own validator.
 
 Not covered here (no source in these two repositories): `physical_ai_av` (compared between
 0.2.0 and 0.2.2 in docs/gpu_session_02.md, block 0 notes) and `transformers` 5.17.0.
@@ -30,7 +41,6 @@ import runners.probe_edge_common as ec
 import runners.probe_train_memory_edge as pmem
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-E = "src/alpamayo2_edge"
 R = "recipes/alpamayo2edge_sft"
 
 
@@ -70,65 +80,82 @@ def _head(repo):
     return subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 
+@pytest.fixture(scope="session")
+def edge_src(edge_source):
+    """Directory holding the alpamayo2_edge sources (checkout or installed package)."""
+    return None if edge_source is None else edge_source["pkg"]
+
+
 # --------------------------------------------------------------------------- pins
 
-def test_checkouts_are_at_the_pinned_commits(edge_src, recipes_src):
-    assert _head(_need(edge_src)) == ec.EDGE_REPO_COMMIT
-    assert _head(_need(recipes_src)) == ec.RECIPES_COMMIT
+def test_sources_are_at_the_pinned_commits(edge_source, recipes_src, installed_recipe_packages):
+    edge, rec = _need(edge_source), _need(recipes_src)
+    assert edge["commit"] == ec.EDGE_REPO_COMMIT, edge
+    assert _head(rec) == ec.RECIPES_COMMIT
     # the recipe pins the very inference commit the probes assume
-    assert f"alpamayo2-edge.git@{ec.EDGE_REPO_COMMIT}" in _read(recipes_src, f"{R}/pyproject.toml")
-    assert 'name = "alpamayo2edge-sft"' in _read(recipes_src, f"{R}/pyproject.toml")
-    assert 'name = "alpamayo2-edge"' in _read(edge_src, "pyproject.toml")
-    assert ec.PAI_REVISION in _read(recipes_src, f"{R}/README.md")
-    assert ec.HF_REVISION in _read(edge_src, "README.md")
+    assert f"alpamayo2-edge.git@{ec.EDGE_REPO_COMMIT}" in _read(rec, f"{R}/pyproject.toml")
+    assert 'name = "alpamayo2edge-sft"' in _read(rec, f"{R}/pyproject.toml")
+    assert ec.PAI_REVISION in _read(rec, f"{R}/README.md")
+    if edge["mode"] == "checkout":
+        assert 'name = "alpamayo2-edge"' in _read(edge["root"], "pyproject.toml")
+        assert ec.HF_REVISION in _read(edge["root"], "README.md")
+    else:
+        # on the pod: the installed distribution, and the recipe packages the probes import
+        # must be the ones of the checkout this test reads
+        assert edge["distribution"]["installed"] and edge["distribution"]["version"]
+        expected = {"alpamayo2edge_sft": os.path.join(rec, R), "alpamayo": os.path.join(rec, "src", "alpamayo")}
+        for name, path in expected.items():
+            found = installed_recipe_packages[name]
+            assert found is not None, f"{name} is not importable in this environment"
+            assert os.path.realpath(found) == os.path.realpath(path), (name, found, path)
 
 
 # --------------------------------------------------------------------------- inference package
 
 def test_inference_entry_points_take_the_arguments_the_probes_pass(edge_src):
     edge = _need(edge_src)
-    load_model = _params(_func(edge, f"{E}/checkpoint.py", "load_model"))
+    load_model = _params(_func(edge, "checkpoint.py", "load_model"))
     assert load_model["positional"] == ["model_id"] and load_model["kwargs"]
     assert {"device", "dtype", "attn_implementation"} <= set(load_model["kwonly"])
-    assert "revision" in _params(_func(edge, f"{E}/checkpoint.py", "resolve_checkpoint"))["kwonly"]
+    assert "revision" in _params(_func(edge, "checkpoint.py", "resolve_checkpoint"))["kwonly"]
 
-    assert _params(_func(edge, f"{E}/helper.py", "prepare_model_inputs"))["positional"] == \
+    assert _params(_func(edge, "helper.py", "prepare_model_inputs"))["positional"] == \
         ["data", "model_config", "tokenizer"]
-    assert _params(_func(edge, f"{E}/helper.py", "to_device"))["positional"][:2] == ["data", "device"]
+    assert _params(_func(edge, "helper.py", "to_device"))["positional"][:2] == ["data", "device"]
 
-    loader = _params(_func(edge, f"{E}/load_physical_aiavdataset.py", "load_physical_aiavdataset"))
+    loader = _params(_func(edge, "load_physical_aiavdataset.py", "load_physical_aiavdataset"))
     assert loader["positional"] == ["clip_id", "t0_us"] and {"nav_text", "avdi"} <= set(loader["kwonly"])
 
-    sampler = _params(_func(edge, f"{E}/models/alpamayo2_edge.py", "sample_trajectories_from_data",
+    sampler = _params(_func(edge, "models/alpamayo2_edge.py", "sample_trajectories_from_data",
                             cls="Alpamayo2Edge"))
     assert sampler["positional"][:2] == ["self", "data"]
     assert {"top_p", "top_k", "temperature", "num_traj_samples", "num_traj_sets",
             "max_generation_length", "diffusion_kwargs", "return_extra"} <= set(sampler["all"])
 
-    assert _params(_func(edge, f"{E}/models/utils.py", "fuse_traj_tokens"))["positional"] == \
+    assert _params(_func(edge, "models/utils.py", "fuse_traj_tokens"))["positional"] == \
         ["history_traj_tokenizer", "future_traj_tokenizer", "input_ids", "traj_data", "traj_ids"]
-    flow = _params(_func(edge, f"{E}/diffusion/flow_matching.py", "sample", cls="FlowMatching"))
+    flow = _params(_func(edge, "diffusion/flow_matching.py", "sample", cls="FlowMatching"))
     assert {"inference_step", "generator"} <= set(flow["all"])
 
 
 def test_recorder_and_error_handling_match_the_release_code(edge_src):
     edge = _need(edge_src)
-    model = _read(edge, f"{E}/models/alpamayo2_edge.py")
+    model = _read(edge, "models/alpamayo2_edge.py")
     # the recorder reads the prompt from the `input_ids` keyword of vlm.generate
     assert re.search(r"self\.vlm\.generate\(\s*input_ids=", model)
     assert 'extra["generated_ids"]' in model and "return pred_xyz, pred_rot, logprob, extra" in model
     # a generation without anchor raises ValueError with this prefix (run_edge_inference)
-    utils = _read(edge, f"{E}/models/expert_utils.py")
+    utils = _read(edge, "models/expert_utils.py")
     assert utils.count("No <traj_future_start> token found") == 2
     # keys the probes read from `extra`
-    extraction = _read(edge, f"{E}/models/token_utils.py")
+    extraction = _read(edge, "models/token_utils.py")
     for key in ('"raw_outputs"', '"cot"', '"meta_action"', '"answer"'):
         assert key in extraction
     # the unsteered run calls vlm.generate the way the release's VQA path does
-    vqa = _read(edge, f"{E}/text_tasks.py")
+    vqa = _read(edge, "text_tasks.py")
     assert "**tokenized, generation_config=generation" in vqa
     # the release's own seeding, mirrored by run_edge_inference
-    inference = _read(edge, f"{E}/inference.py")
+    inference = _read(edge, "inference.py")
     assert "torch.manual_seed(settings[\"seed\"])" in inference
     assert f"seed={ec.DEFAULT_SEED}," in inference
     assert f"max_generation_length={ec.DEFAULT_MAX_GENERATION_LENGTH}," in inference
@@ -137,15 +164,15 @@ def test_recorder_and_error_handling_match_the_release_code(edge_src):
 
 def test_constants_copied_from_the_inference_package(edge_src):
     edge = _need(edge_src)
-    assert _literal(edge, f"{E}/chat_template.py", "CLOSED_THINKING") == ec.CLOSED_THINKING
-    assert set(_literal(edge, f"{E}/chat_template.py", "CAMERA_DISPLAY_NAMES")) == set(ec.EDGE_CAMERA_NAMES)
-    assert _literal(edge, f"{E}/sample.py", "CAMERA_FRAME_COUNTS") == ec.EDGE_CAMERA_FRAME_COUNTS
-    cameras = _literal(edge, f"{E}/load_physical_aiavdataset.py", "_CAMERAS")
+    assert _literal(edge, "chat_template.py", "CLOSED_THINKING") == ec.CLOSED_THINKING
+    assert set(_literal(edge, "chat_template.py", "CAMERA_DISPLAY_NAMES")) == set(ec.EDGE_CAMERA_NAMES)
+    assert _literal(edge, "sample.py", "CAMERA_FRAME_COUNTS") == ec.EDGE_CAMERA_FRAME_COUNTS
+    cameras = _literal(edge, "load_physical_aiavdataset.py", "_CAMERAS")
     assert {i: name.lower() for i, name in cameras} == ec.EDGE_CAMERA_NAMES
-    sample = _read(edge, f"{E}/sample.py")
+    sample = _read(edge, "sample.py")
     assert "(163840, 196608) if camera in (1, 6) else (81920, 98304)" in sample
     # the loader refuses an event before 2.0 s, the lower bound the probes document
-    assert "2_000_000 <= t0_us" in _read(edge, f"{E}/load_physical_aiavdataset.py")
+    assert "2_000_000 <= t0_us" in _read(edge, "load_physical_aiavdataset.py")
 
 
 # --------------------------------------------------------------------------- recipe

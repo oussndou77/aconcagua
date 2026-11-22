@@ -1,6 +1,8 @@
 # Séance GPU 02 — observations (Alpamayo 2 Edge)
 
-*Copier ce fichier dans `docs/observations/AAAA-MM-JJ-session02/README.md`. Remplir uniquement à partir des JSON de la séance, copiés dans le même dossier. Une valeur non mesurée s'écrit « non mesuré », avec la raison.*
+*Remplir une copie de ce fichier à partir des JSON de la séance (archive `session02_outputs.tgz`). Une valeur non mesurée s'écrit « non mesuré », avec la raison.*
+
+*Avant de publier une copie remplie : voir « Ce qui est publiable » dans `docs/gpu_session_02.md`. Les lignes marquées **(non publiable)** restent hors de toute publication jusqu'à la réponse de NVIDIA (D-012) ; les JSON bruts et le dossier `eval_base` ne se copient pas dans le dépôt sans ce tri.*
 
 | Champ | Valeur |
 |---|---|
@@ -9,6 +11,7 @@
 | Commits : alpamayo-recipes / alpamayo2-edge / aconcagua (`env.alpamayo2_edge.commit`, `pins`) | |
 | Révisions HF : modèle / PAI ; résultat des trois `cmp` du bloc 0 | |
 | Durée de `uv sync`, incidents d'installation | |
+| Contrôle d'API du bloc 0 (dernière ligne de `api_check.log` : `9 passed`, aucun sauté) | |
 | Écarts au plan `docs/gpu_session_02.md` | |
 
 ---
@@ -50,19 +53,20 @@ Trois CoC mot pour mot (`summary.per_event[*].cot_first_candidate`), avec l'inst
 
 ## Bloc 2 — Blackout
 
-**Question.** Toutes caméras noires, puis caméra frontale seule : la CoC décrit-elle encore une scène, et la trajectoire s'écarte-t-elle du run propre au-delà de la dispersion entre candidats ? (Inconnue 13 ; défaut de référence : NVlabs/alpamayo2#9 sur 2 Super.)
+**Question.** Toutes caméras noires, puis les deux caméras avant, puis la caméra frontale seule : la CoC décrit-elle encore une scène, et la trajectoire s'écarte-t-elle du run propre au-delà de la dispersion entre candidats ? (Inconnue 13 ; défaut de référence : NVlabs/alpamayo2#9 sur 2 Super.)
 
 **Valeur observée.**
 
-| Mesure | `blackout_all` | `blackout_front` |
-|---|---|---|
-| Événements avec sortie / manquants (`events_with_output`, `events_missing`) | | |
-| Événements au-delà de la dispersion propre (`n_exceeding_clean_spread` / `n_compared_with_spread`) | | |
-| Écart moyen entre trajectoires moyennes (`mean_ade_between_means_m`) | | |
-| Dispersion propre moyenne, le plancher (`mean_clean_within_spread_m`) | | |
-| Longueur de parcours, propre / noircie (`mean_path_length_clean_m`, `mean_path_length_condition_m`) | | |
-| CoC vides, longueur médiane (`reasoning.n_empty_cot`, `reasoning.reasoning_tokens`) | | |
-| Événements sans ancre (`reasoning.stop_counts`) | | |
+| Mesure | `blackout_all` | `blackout_front_both` | `blackout_front` |
+|---|---|---|---|
+| Images noircies (`conditions.<condition>.blacked_out.n_images`) | 22 | 10 (caméras 1 et 6) | 5 (caméra 1) |
+| Événements avec sortie / manquants (`events_with_output`, `events_missing`) | | | |
+| Événements au-delà de la dispersion propre (`n_exceeding_clean_spread` / `n_compared_with_spread`) | | | |
+| Écart moyen entre trajectoires moyennes (`mean_ade_between_means_m`) | | | |
+| Dispersion propre moyenne, le plancher (`mean_clean_within_spread_m`) | | | |
+| Longueur de parcours, propre / noircie (`mean_path_length_clean_m`, `mean_path_length_condition_m`) | | | |
+| CoC vides, longueur médiane (`reasoning.n_empty_cot`, `reasoning.reasoning_tokens`) | | | |
+| Événements sans ancre (`reasoning.stop_counts`) | | | |
 
 Cinq paires de CoC mot pour mot (`summary.<condition>.per_event[*].cot_clean`, `cot_condition`) :
 
@@ -72,7 +76,7 @@ Cinq paires de CoC mot pour mot (`summary.<condition>.per_event[*].cot_clean`, `
 
 **Commande et JSON source.** `runners/probe_blackout_edge.py --baseline-json …/tokens_edge.json --out …/blackout_edge.json`.
 
-**Conclusion.** (Sous `blackout_all`, la CoC cite-t-elle des éléments visuels — feux, véhicules, voie libre ? La trajectoire change-t-elle, ralentit-elle ? Différence entre toutes caméras et frontale seule. Edge partage-t-il le défaut de 2 Super : oui / non / partiellement, avec les faits.)
+**Conclusion.** (Sous `blackout_all`, la CoC cite-t-elle des éléments visuels — feux, véhicules, voie libre ? La trajectoire change-t-elle, ralentit-elle ? Différence entre les trois conditions : sans le grand angle seul, le téléobjectif suffit-il ; sans les deux caméras avant, le modèle se comporte-t-il comme sans aucune caméra ? Edge partage-t-il le défaut de 2 Super : oui / non / partiellement, avec les faits.)
 
 ---
 
@@ -128,7 +132,8 @@ Cinq paires de CoC mot pour mot (`summary.<étiquette>.per_event[*]`) :
 | Constats `SequenceTooLong` (`summary.findings` : configuration, longueur réelle, `max_length`) | |
 | Poids chargés en FP32 (`summary.weights_gib`) ; paramètres entraînés et leur type (`model.n_trainable`, `trainable_dtypes`) | |
 | Pics du premier pas : après passe avant / arrière / optimiseur (`train_steps[0].peak_after_*_gib`) | |
-| Pertes du premier pas (`loss`, `vlm_ce`, `future_traj_ce`, `others_ce`, `expert_diffusion`) et norme du gradient | |
+| Pertes du premier pas (`loss`, `vlm_ce`, `future_traj_ce`, `others_ce`, `expert_diffusion`) et norme du gradient **(non publiable)** | |
+| Aucune pose écrite (`example.target_trajectory.values_written` vaut `false`) | |
 | Jetons supervisés et début du texte supervisé (`steps.sequence.supervised_tokens`, `supervised_text_head`) | |
 | CoC de l'exemple : source et longueur (`example.cot`) | |
 | Le prétraitement lu dans la recette est celui attendu (`recipe.preprocess_matches_pinned_copy`) | |
@@ -150,13 +155,13 @@ Cinq paires de CoC mot pour mot (`summary.<étiquette>.per_event[*]`) :
 | Bloc lancé ? Sinon, pourquoi | |
 | Taille du morceau PAI téléchargé (`du -sh $PAI_DIR`) | |
 | Événements évalués, couverture (`eval_samples`, `eval_generation_coverage`) | |
-| minADE de la recette (`eval_min_ade` : XY, 6,4 s, 6 candidats, prompt trajectoire seule) | |
+| minADE de la recette (`eval_min_ade` : XY, 6,4 s, 6 candidats, prompt trajectoire seule) **(non publiable)** | |
 | Format du prompt (`evaluation_protocol.json` : `prompt_format`, `native_release_prompt`) | |
 | Pic mémoire et durée | |
 
 **Commande et JSON source.** `python -m alpamayo2edge_sft.evaluate_hf --config-name sft_eval_trajectory …` ; `eval_base/…/trajectory_summary.json`, `evaluation_protocol.json`.
 
-**Conclusion.** (Le chemin est reproduit ou non, et ce qui a bloqué. Rappel : ce minADE ne se compare ni à celui de la fiche ni à celui d'`afh`.)
+**Conclusion.** (Le chemin est reproduit ou non, et ce qui a bloqué. Rappel : ce minADE ne se compare ni à celui de la fiche ni à celui d'`afh`, et il reste privé jusqu'à D-012.)
 
 ---
 

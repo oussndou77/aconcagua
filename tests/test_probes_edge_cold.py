@@ -290,9 +290,17 @@ def _native_layout(time_major=False):
 def test_blackout_selects_images_by_camera_identifier():
     cams, _ = _native_layout()
     assert ec.positions_for_cameras(cams, ec.BLACKOUT_CONDITIONS["blackout_all"]) == list(range(22))
+    # order of the session: no camera, then both forward cameras, then the front wide alone
+    assert list(ec.BLACKOUT_CONDITIONS) == ["blackout_all", "blackout_front_both", "blackout_front"]
+    assert "default=list(BLACKOUT_CONDITIONS)" in open(os.path.join(ROOT, "runners/probe_blackout_edge.py")).read()
     front = ec.positions_for_cameras(cams, ec.BLACKOUT_CONDITIONS["blackout_front"])
     assert front == [3, 4, 5, 6, 7] and all(cams[i] == 1 for i in front)
     assert ec.BLACKOUT_CONDITIONS["blackout_front"] == (1,)          # the telephoto (6) stays
+    both = ec.positions_for_cameras(cams, ec.BLACKOUT_CONDITIONS["blackout_front_both"])
+    assert ec.BLACKOUT_CONDITIONS["blackout_front_both"] == (1, 6)
+    assert both == [3, 4, 5, 6, 7, 17, 18, 19, 20, 21] and {cams[i] for i in both} == {1, 6}
+    assert {cams[i] for i in range(22) if i not in both} == {0, 2, 3, 5}   # side and rear stay
+    assert set(front) < set(both) < set(range(22))
     # identity, not position: the same camera in a time-major list
     cams_t, _ = _native_layout(time_major=True)
     pos = ec.positions_for_cameras(cams_t, [1])
@@ -524,7 +532,15 @@ def test_blackout_summary_compares_with_the_clean_spread():
                                                        "cot_clean": ["Turn left on green."],
                                                        "candidates": [_cand(tok, "Turn left on green.")]}}},
         {"index": 1, "conditions": {"blackout_all": {"status": "error"}}}]}
-    s = pblack.summarize(payload, ["blackout_all", "blackout_front"])
+    payload["events"][0]["conditions"]["blackout_front_both"] = {
+        "status": "ok", "deviation_vs_clean": dev_big, "cot_clean": ["Turn left on green."],
+        "candidates": [_cand(tok, "")]}
+    s = pblack.summarize(payload, list(ec.BLACKOUT_CONDITIONS))
+    assert list(s) == ["blackout_all", "blackout_front_both", "blackout_front"]
+    assert s["blackout_front_both"]["n_exceeding_clean_spread"] == 1
+    assert s["blackout_front_both"]["reasoning"]["n_empty_cot"] == 1
+    assert s["blackout_front_both"]["events_missing"] == [1]
+    assert ec.forbidden_keys(s) == []
     a, f = s["blackout_all"], s["blackout_front"]
     assert a["events_with_output"] == 1 and a["events_missing"] == [1]
     assert a["n_exceeding_clean_spread"] == 1 and a["n_compared_with_spread"] == 1
@@ -590,6 +606,142 @@ def test_navigation_summary_counts_per_label():
     json.dumps(s)
 
 
+# --------------------------------------------------------------------------- no ground truth in the JSON
+
+def test_guard_refuses_dataset_ground_truth_keys(tmp_path):
+    for key in ("ego_future_xyz", "ego_future_rot", "ego_history_xyz", "future_end_xyz", "future_poses",
+                "gt_xy", "ground_truth", "logged_future_xy", "ade_vs_logged_future_m", "min_ade",
+                "eval_min_ade", "eval_min_ade_successful", "ade_vs_gt_m", "Ego_Future_XYZ"):
+        payload = {"example": {"nested": [{"ok": 1}, {key: [1.0, 2.0, 3.0]}]}}
+        assert ec.forbidden_keys(payload) == [f"example.nested[1].{key}"], key
+        with pytest.raises(ec.GroundTruthInPayload, match="ground truth"):
+            ec.write_probe_json(str(tmp_path / "x.json"), payload)
+    assert not (tmp_path / "x.json").exists()
+    # what the probes do write is accepted: model outputs, deviations between model outputs,
+    # training-sequence bookkeeping
+    allowed = {"pred_xyz": [[[1, 2, 3]]], "deviation_vs_clean": {"ade_between_means_m": 1.0, "ade_paired_m": 1.0,
+               "end_y_baseline_m": 0.0, "path_length_condition_m": 3.0}, "future_placeholders": 128,
+               "n_future_trajectory_tokens": 0, "traj_future_end_positions": [], "future_traj_ce": 1.2,
+               "target_trajectory": {"n_waypoints": 64, "values_written": False},
+               "mean_ade_between_means_m": 0.5, "within_spread_m": 0.3}
+    assert ec.forbidden_keys(allowed) == []
+    ec.write_probe_json(str(tmp_path / "ok.json"), allowed)
+    assert json.loads((tmp_path / "ok.json").read_text())["future_placeholders"] == 128
+
+
+def test_edge_probes_only_write_through_the_guard():
+    common = open(os.path.join(ROOT, "runners/probe_edge_common.py")).read()
+    # the single unguarded write is the one inside write_probe_json itself
+    assert common.count("write_json(") == 1 and "    write_json(path, payload)" in common
+    for script in EDGE_SCRIPTS:
+        src = open(os.path.join(ROOT, "runners", script)).read()
+        assert "write_json(" not in src, script
+        assert "write_probe_json(" in src, script
+        assert "json.dump" not in src and "open(" not in src.split('"""', 2)[2], script
+
+
+def _parents(tree):
+    import ast
+    return {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+
+def test_future_poses_only_feed_the_training_sample():
+    """Static: in the memory probe the loaded future is used twice and nowhere else — merged
+    into the training sample, and asked for its number of waypoints."""
+    import ast
+    src = open(os.path.join(ROOT, "runners/probe_train_memory_edge.py")).read()
+    tree = ast.parse(src)
+    parents = _parents(tree)
+    uses = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "future" and isinstance(node.ctx, ast.Load):
+            uses.append(ast.unparse(parents[parents[node]] if isinstance(parents[node], ast.Subscript)
+                                    else parents[node]))
+    assert sorted(uses) == ['future[\'ego_future_xyz\'].shape', 'sub.update(future)'], uses
+    assert "future_end_xyz" not in src and "values_written\": False" in src
+    # blocks 1 to 3 never load a future, and no Edge probe reads the pose tensors directly
+    for script in ("probe_tokens_edge.py", "probe_blackout_edge.py", "probe_nav_edge.py"):
+        other = open(os.path.join(ROOT, "runners", script)).read()
+        assert "load_future_poses" not in other and "ego_future" not in other and "ego_history" not in other
+    # in the shared module the pose tensors appear only where they are loaded or handed to
+    # the release (unsteered run: history tokens fused into the prompt)
+    tree = ast.parse(open(os.path.join(ROOT, "runners/probe_edge_common.py")).read())
+    owners = set()
+    for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+        if any(isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith(("ego_future", "ego_history"))
+               for n in ast.walk(fn) if not (isinstance(n, ast.Constant) and n is ast.get_docstring(fn))):
+            owners.add(fn.name)
+    assert owners == {"load_future_poses", "run_unconstrained"}, owners
+
+
+class _Arr:
+    """Tiny stand-in for a tensor: what sample_report and prompt_report touch."""
+
+    def __init__(self, a):
+        self.a = np.asarray(a)
+        self.shape = self.a.shape
+
+    def tolist(self):
+        return self.a.tolist()
+
+    def reshape(self, *shape):
+        return _Arr(self.a.reshape(*shape))
+
+
+def test_sample_and_prompt_reports_carry_no_pose():
+    cams, ts = _native_layout()
+    sentinel = 7.13579
+    sample = {"image_frames": _Arr(np.zeros((22, 1, 3, 4, 8), dtype=np.uint8)),
+              "camera_indices": _Arr(cams), "absolute_timestamps": _Arr(ts),
+              "ego_history_xyz": _Arr(np.full((1, 20, 3), sentinel)),
+              "ego_history_rot": _Arr(np.full((1, 20, 3, 3), sentinel)),
+              "ego_future_xyz": _Arr(np.full((1, 64, 3), sentinel)),
+              "provenance": {"dataset": "nvidia/PhysicalAI-Autonomous-Vehicles", "clip_id": "c", "t0_us": 5}}
+    report = ec.sample_report(sample)
+    dumped = json.dumps(report)
+    assert "7.13579" not in dumped and ec.forbidden_keys(report) == []
+    assert report["images_per_camera"] == {"0": 3, "1": 5, "2": 3, "3": 3, "5": 3, "6": 5}
+    assert report["image_frames_shape"] == [22, 1, 3, 4, 8]
+
+    # history tokens that would fall in the reported end of the prompt are withheld
+    tok = FakeTokenizer()
+    h0 = IDS["history_id0"]
+
+    class Model:
+        class config:                                                   # noqa: N801
+            traj_ids = TRAJ_IDS
+            history_vocab_size = ec.HISTORY_VOCAB
+
+            class vlm_config:                                           # noqa: N801
+                image_token_id = IDS["image_token_id"]
+
+        class tokenizer:                                                # noqa: N801
+            decode = staticmethod(lambda ids, skip_special_tokens=False: tok.decode(ids))
+            convert_ids_to_tokens = staticmethod(lambda ids: [tok.token(i) for i in ids])
+
+    text = tok.ids("output the future trajectory.", "<think>", "</think>")
+    prompt = [IDS["image_token_id"]] * 3 + [h0 + 5, h0 + 999] + text
+    rep = ec.prompt_report(prompt, Model, tail=len(text) + 2)
+    assert rep["history_tokens_withheld_from_tail"] == 2 and rep["tail_ids"] == text
+    assert all(not h0 <= t < h0 + ec.HISTORY_VOCAB for t in rep["tail_ids"])
+    assert rep["n_image_tokens"] == 3 and rep["prompt_len"] == len(prompt)
+    assert rep["ends_with_closed_thinking"] and ec.forbidden_keys(rep) == []
+    assert ec.prompt_report(prompt, Model, tail=3)["history_tokens_withheld_from_tail"] == 0
+
+
+def test_probe_summaries_hold_no_ground_truth_key():
+    names = [c.name for c in ec.EDGE_FALLBACK_CONFIGS]
+    res = pc.run_with_fallback(ec.EDGE_FALLBACK_CONFIGS, _fake_attempt({n: "ok" for n in names}))
+    assert ec.forbidden_keys(pmem.summarize(res, 9.9, 79.6)) == []
+    assert ec.forbidden_keys(res) == []
+    tok = FakeTokenizer()
+    assert ec.forbidden_keys(_cand(tok, "Keep lane.")) == []
+    dev = ec.deviation(np.stack([_line(8.0, 9.0)] * 2), np.stack([_line(8.0, -9.0)] * 2))
+    assert ec.forbidden_keys(dev) == []
+    assert ec.forbidden_keys(pnav.follow_report("Turn left in 11m", "Turn right in 11m", dev,
+                                                ["Turn left."], ["Turn right."], 1.0)) == []
+
+
 # --------------------------------------------------------------------------- contracts
 
 EDGE_SCRIPTS = ("probe_tokens_edge.py", "probe_blackout_edge.py", "probe_nav_edge.py",
@@ -627,6 +779,59 @@ def test_session_02_names_the_pins_and_the_five_blocks():
         assert needed in doc, needed
     for block in range(6):
         assert f"## Bloc {block} " in doc, block
+
+
+def test_session_02_closing_publishes_nothing_and_states_what_is_publishable():
+    doc = open(os.path.join(ROOT, "docs/gpu_session_02.md")).read()
+    closing = doc[doc.index("## Clôture"):doc.index("## Ce qui est publiable")]
+    commands = "\n".join(re.findall(r"```bash\n(.*?)```", closing, re.S))
+    for forbidden in ("git push", "git add", "git commit", "git checkout"):
+        assert forbidden not in commands, forbidden
+    assert "tar czf $WS/session02_outputs.tgz -C $OUT --exclude=samples ." in commands
+    assert "runpodctl send $WS/session02_outputs.tgz" in commands
+    assert closing.index("runpodctl send") < closing.index("nvidia-smi")     # archive out before the pod stops
+    assert "avant** d'arrêter le pod" in closing
+    # no command of the whole session publishes
+    all_commands = "\n".join(re.findall(r"```bash\n(.*?)```", doc, re.S))
+    assert "git push" not in all_commands and "git commit" not in all_commands
+    section = doc[doc.index("## Ce qui est publiable"):doc.index("## Ce que la séance ne fait pas")]
+    for needed in ("D-012", "minADE du bloc 5", "eval_base", "vérité terrain", "pred_xyz",
+                   "write_probe_json", "samples/"):
+        assert needed in section, needed
+    publishable, private = [], []
+    for line in section.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 2 and not set(cells[0]) <= set("-"):
+            publishable.append(cells[0])
+            private.append(cells[1])
+    assert any("CoC" in c for c in publishable) and any("trajectoires prédites" in c for c in publishable)
+    assert any("mémoire" in c for c in publishable) and any("écarts" in c for c in publishable)
+    assert any("minADE" in c for c in private) and any("poses" in c for c in private)
+    assert not any("minADE" in c for c in publishable[1:])
+
+
+def test_session_02_runs_the_api_check_on_the_installed_sources():
+    doc = open(os.path.join(ROOT, "docs/gpu_session_02.md")).read()
+    block0 = doc[doc.index("## Bloc 0 "):doc.index("## Bloc 1 ")]
+    assert block0.index("uv sync --active --locked") < block0.index("tests/test_edge_pinned_api_cold.py")
+    (command,) = re.findall(r"(EDGE_INSTALLED=1(?:[^\n]*\\\n)*[^\n]*)", block0)
+    for needed in ("EDGE_INSTALLED=1", "RECIPES_REPO=$REPO_DIR", "tests/test_edge_pinned_api_cold.py",
+                   "--fail-on-skip", "false; }"):
+        assert needed in command, needed
+    assert "| tee" not in command                    # a pipe would hide the exit status
+    conftest = open(os.path.join(ROOT, "tests/conftest.py")).read()
+    assert '"--fail-on-skip"' in conftest and "EDGE_INSTALLED" in conftest
+
+
+def test_session_02_recommends_the_h100_and_lists_three_blackout_conditions():
+    doc = open(os.path.join(ROOT, "docs/gpu_session_02.md")).read()
+    (gpu_row,) = [line for line in doc.splitlines() if line.startswith("| GPU |")]
+    assert "H100 80 Go, recommandé" in gpu_row and "A100 80 Go en repli" in gpu_row
+    rows = re.findall(r"^\| `(blackout_\w+)` \|", doc, re.M)
+    assert rows == list(ec.BLACKOUT_CONDITIONS)
+    tpl = open(os.path.join(ROOT, "docs/observations/TEMPLATE-session02.md")).read()
+    assert "| Mesure | `blackout_all` | `blackout_front_both` | `blackout_front` |" in tpl
+    assert tpl.count("(non publiable)") >= 3 and "D-012" in tpl
 
 
 def test_session_02_template_has_one_section_per_block_with_the_four_fields():

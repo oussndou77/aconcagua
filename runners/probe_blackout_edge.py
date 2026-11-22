@@ -6,8 +6,12 @@ probe_blackout_edge.py — Alpamayo 2 Edge with black cameras (gpu_session_02, b
 Same events, same seed and same release path as block 1 (probe_tokens_edge.py), with images
 replaced by black frames before preprocessing:
 
-    blackout_all     every image of every camera is black;
-    blackout_front   only the front wide camera (id 1) is black; the telephoto stays.
+    blackout_all          every image of every camera is black;
+    blackout_front_both   both forward cameras are black: front wide (id 1) and front
+                          telephoto (id 6); the four side and rear cameras stay;
+    blackout_front        only the front wide camera (id 1) is black; the telephoto stays.
+
+They run in that order, from no camera at all to a single camera missing.
 
 Images are selected by camera identifier on Edge's flat list of 22 images (one identifier
 per image). `afh.degradation` is not used: it assumes a camera x time tensor (D-010 update).
@@ -36,7 +40,6 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runners.probe_common import write_json  # noqa: E402
 from runners.probe_edge_common import (  # noqa: E402
     BLACKOUT_CONDITIONS,
     add_common_args,
@@ -49,6 +52,7 @@ from runners.probe_edge_common import (  # noqa: E402
     run_condition,
     summarize_reasoning,
     with_blackout,
+    write_probe_json,
 )
 
 
@@ -109,7 +113,7 @@ def main(argv: list[str] | None = None) -> dict:
         sample, entry = load_event_sample(event, avdi, args.sample_cache)
         payload["events"].append(entry)
         if sample is None:
-            write_json(out, payload)
+            write_probe_json(out, payload)
             continue
         clean_xyz, clean_cot = base_xyz.get(event.key), base_cot.get(event.key)
         if clean_xyz is None:
@@ -126,7 +130,7 @@ def main(argv: list[str] | None = None) -> dict:
             if clean_xyz and res.get("pred_xyz"):
                 res["deviation_vs_clean"] = deviation(clean_xyz, res["pred_xyz"])
             entry["conditions"][name] = res
-            write_json(out, payload)
+            write_probe_json(out, payload)
             rows = res.get("candidates") or []
             print(f"[event {event.index}] {name}: status={res.get('status')} "
                   f"deviation={res.get('deviation_vs_clean')}")
@@ -134,7 +138,7 @@ def main(argv: list[str] | None = None) -> dict:
                 print(f"    cot[0]: {rows[0]['cot'][:160]!r}")
 
     payload["summary"] = summarize(payload, args.conditions)
-    write_json(out, payload)
+    write_probe_json(out, payload)
     for name, s in payload["summary"].items():
         print(f">>> {name}: {s['n_exceeding_clean_spread']}/{s['n_compared_with_spread']} events beyond "
               f"the clean spread; mean deviation {s['mean_ade_between_means_m']} m")

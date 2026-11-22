@@ -40,7 +40,6 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runners.probe_common import write_json  # noqa: E402
 from runners.probe_edge_common import (  # noqa: E402
     add_common_args,
     baseline_cots,
@@ -54,6 +53,7 @@ from runners.probe_edge_common import (  # noqa: E402
     run_condition,
     validate_navigation_live,
     with_navigation,
+    write_probe_json,
 )
 
 LABELS = ("mirror", "straight")
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> dict:
         sample, entry = load_event_sample(event, avdi, args.sample_cache)
         payload["events"].append(entry)
         if sample is None:
-            write_json(out, payload)
+            write_probe_json(out, payload)
             continue
         clean_xyz, clean_cot = base_xyz.get(event.key), base_cot.get(event.key)
         if clean_xyz is None:
@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> dict:
             if validation.get("validated") and not validation.get("valid"):
                 entry["conditions"][label] = {"status": "invalid_navigation", "nav_text": nav,
                                               "validation": validation}
-                write_json(out, payload)
+                write_probe_json(out, payload)
                 continue
             res = run_condition(model, with_navigation(sample, nav), recorder, args)
             res.update(nav_text=nav, nav_text_original=event.nav_text, validation=validation,
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> dict:
                                           [c["cot"] for c in res.get("candidates") or []],
                                           args.min_lateral_m)
             entry["conditions"][label] = res
-            write_json(out, payload)
+            write_probe_json(out, payload)
             rows = res.get("candidates") or []
             print(f"[event {event.index}] {event.nav_text!r} -> {nav!r}: status={res.get('status')} "
                   f"end_y {dev and dev['end_y_baseline_m']} -> {dev and dev['end_y_condition_m']}")
@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> dict:
                 print(f"    cot[0]: {rows[0]['cot'][:160]!r}")
 
     payload["summary"] = summarize(payload)
-    write_json(out, payload)
+    write_probe_json(out, payload)
     for label, s in payload["summary"].items():
         print(f">>> {label}: trajectory beyond clean spread {s['trajectory_beyond_clean_spread']}, "
               f"lateral sign flipped {s['lateral_sign_flipped']}, "

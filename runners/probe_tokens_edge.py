@@ -43,7 +43,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runners.probe_common import write_json  # noqa: E402
 from runners.probe_edge_common import (  # noqa: E402
     add_common_args,
     load_event_sample,
@@ -51,6 +50,7 @@ from runners.probe_edge_common import (  # noqa: E402
     run_condition,
     run_unconstrained,
     summarize_reasoning,
+    write_probe_json,
 )
 
 
@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> dict:
         sample, entry = load_event_sample(event, avdi, args.sample_cache)
         payload["events"].append(entry)
         if sample is None:
-            write_json(out, payload)
+            write_probe_json(out, payload)
             continue
         if first_sample is None:
             first_sample = (len(payload["events"]) - 1, sample)
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> dict:
             except Exception as exc:  # noqa: BLE001 — optional check; block 1's answer is saved
                 entry["conditions"]["unconstrained"] = {
                     "status": "error", "error": f"{type(exc).__name__}: {str(exc)[:600]}"}
-        write_json(out, payload)
+        write_probe_json(out, payload)
         rows = clean.get("candidates") or []
         print(f"[event {event.index}] {event.nav_text!r} status={clean.get('status')} "
               f"reasoning tokens={[r['reasoning_tokens'] for r in rows]}")
@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> dict:
                                       "identical_trajectories": xa == again.get("pred_xyz")}
 
     payload["summary"] = summarize(payload)
-    write_json(out, payload)
+    write_probe_json(out, payload)
     r = payload["summary"]["reasoning"]
     print(f"\n>>> {r.get('n_candidates', 0)} candidates; stop: {r.get('stop_counts')}; "
           f"empty reasoning: {r.get('n_empty_cot')}; reasoning tokens: {r.get('reasoning_tokens')}")

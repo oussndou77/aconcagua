@@ -226,6 +226,13 @@ Autres faits sur ces données :
 
 1. **Texte.** Le champ `cot` accepte n'importe quelle chaîne non vide. Rien ne contraint son vocabulaire ni sa longueur à l'entraînement, hors le plafond de 8 192 jetons.
 2. **Navigation.** La tâche native exige un `nav_text` par événement. PAI public n'en fournit pas (`E/load_physical_aiavdataset.py:147-148`) ; nos manifestes et fixtures non plus.
+   **À vérifier, non examiné ici (2026-11-22).** Un commit plus récent du dataset, `14ed7a7` (« Fold the navigation release into version 26.11 », vers le 2026-11-14), ajouterait des labels de navigation dérivés d'OpenStreetMap, sous ODbL selon la fiche. Signalé par Ousseynou ; quatre questions restent sans réponse parce que Hugging Face est inaccessible depuis l'environnement à froid (accès direct et lecture web refusés) :
+   - l'instruction est-elle donnée par clip ou par événement ;
+   - sous quel fichier, quel schéma, et quel texte (du type « Turn left in 25m » ou non), et passe-t-elle `validate_navigation` ;
+   - la révision `33f9bf4` épinglée par la recette la contient-elle, ou faut-il une révision plus récente ;
+   - couvre-t-elle nos clips de fixtures, dont `0ea6fd88`.
+
+   Ce que disent les sources accessibles : rien. La recette à `622f9d2` (2026-11-10, donc antérieure à ce commit) ne lit aucune navigation dans PAI : `scripts/prepare_pai_annotations.py` attend une navigation fournie par l'utilisateur et le dit (« This script neither generates navigation instructions nor verifies their semantics »). Le SDK du dataset (`physical_ai_av` 0.2.3, 2026-10-22, et son wiki) ne contient aucune mention de navigation. La phrase « PAI public n'en fournit pas » ci-dessus vaut donc pour le code lu et pour la révision épinglée, pas nécessairement pour la version 26.11.
 3. **Images dégradées.** Le dataset décode les images directement depuis PAI (`R/dataset.py:292-298`) et les passe au prétraitement (`:365-366`) sans point d'entrée pour une dégradation. Deux points d'extension existent dans le code : `dataset_interface_factory` (`:151`, `:200-204`) et la surcharge de `_load_sample`.
 4. **Trajectoire cible amortie.** Le futur est recalculé depuis l'egomotion (`:322-346`). Une cible différente de la trajectoire enregistrée demande de remplacer `ego_future_xyz` et `ego_future_rot`, qui alimentent à la fois les jetons discrets et l'expert (`sft.py:725-735`).
 5. **Fenêtre temporelle.** `t0` entre 2,0 s et 13,6 s. Notre `t0` de 5,1 s sur `0ea6fd88` y entre.

@@ -305,9 +305,9 @@ L'archive est privée dans son ensemble. Avant de publier quoi que ce soit (dép
 | Les longueurs de raisonnement, les jetons générés, les longueurs de séquence | Les pertes du bloc 4 (`loss`, `vlm_ce`, `future_traj_ce`, `others_ce`, `expert_diffusion`) : elles sont calculées contre la trajectoire vraie |
 | La mémoire et les temps (blocs 1 à 4), l'environnement, les commits | |
 
-Les pertes du bloc 4 sont classées non publiables par prudence : ce ne sont pas des chiffres de benchmark, mais elles dépendent de la vérité terrain. À confirmer par Ousseynou.
+Les pertes du bloc 4 sont classées non publiables par prudence : ce ne sont pas des chiffres de benchmark, mais elles dépendent de la vérité terrain. Classement confirmé par Ousseynou le 2026-11-22 ; elles restent dans le JSON.
 
-D-012 n'a pas encore d'entrée dans `docs/DECISIONS.md` ; cette section s'y réfère telle qu'Ousseynou l'a énoncée.
+La règle est D-012 (`docs/DECISIONS.md`) : tant que NVIDIA n'a pas répondu par écrit, aucune donnée du dataset, aucun chiffre contre sa vérité terrain et aucun poids dérivé ne sont publiés ; les sorties du modèle le sont.
 
 **Ce que les sondes garantissent.**
 

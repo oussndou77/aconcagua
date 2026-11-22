@@ -4,3 +4,5 @@
 # runner's docstring); nothing from those repos is vendored here.
 numpy>=1.24
 pytest>=7.0
+# renders the checkpoint chat template in tests/test_probes_edge_cold.py (skipped if absent)
+jinja2>=3.1

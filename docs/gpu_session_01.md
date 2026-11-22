@@ -2,6 +2,8 @@
 
 *Préparée le 2026-10-11, à froid. Rien ici n'a encore tourné sur GPU.*
 
+**Publication (D-012).** Les sorties des sondes de cette séance (`probe_tokens_a2.py`, `probe_train_memory_a2.py`, `probe_blackout_a15.py`) tombent sous D-012 : elles contiennent des chiffres contre la vérité terrain de PAI (`ade_vs_logged_future_m`, `baseline_min_ade`, `cf_min_ade`) et restent hors de tout dépôt public jusqu'à la réponse de NVIDIA. Cette séance n'a jamais tourné ; les sondes ne sont pas modifiées.
+
 **But.** Lever les inconnues 1, 4, 5, 6 et 8 de `docs/finetune_design.md` §4, donner les entrées de D-014 (recette officielle comme base W1) et du réexamen de D-003, et décider le go/no-go W3. Les observations se notent dans une copie de `docs/observations/TEMPLATE-session.md`.
 
 **Ce qui a changé depuis la note de conception.** NVIDIA a publié `alpamayo-recipes/recipes/alpamayo2_sft` (#39). Le bloc 2 mesure donc la mémoire par le chemin d'entraînement officiel (processeur, collate et `forward` de la recette), plus par un exemple fait main. Revue : `docs/recipe_a2_sft_review.md`.

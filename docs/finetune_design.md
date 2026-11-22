@@ -2,6 +2,8 @@
 
 *Livrable « design note » de W1 (`ROADMAP.md` §4). Rédigé à froid, sans GPU, le 2026-09-30.*
 
+> **Mise à jour du 2026-11-22 (D-015, D-016).** La base de W1 est maintenant Alpamayo 2 Edge, sur la recette officielle `alpamayo2edge_sft`. Les §1 à §3 ci-dessous décrivent le portage de la recette 1.5 vers 2 Super : ils restent comme référence sur 2 Super mais ne sont plus le plan de W1. Le tableau des inconnues du §4 est refait pour Edge ; l'ancien tableau est conservé au §4.2. Source pour Edge : `docs/edge_review.md`.
+
 **Sources lues, par commit** (tout ce qui suit est tiré du code, pas des blogs) :
 
 | Dépôt | Commit | Ce qui a été lu |
@@ -335,7 +337,33 @@ Structure `recipes/alpamayo2_super_sft/` calquée sur `alpamayo1_5_sft` (README,
 
 ---
 
-## 4. Inconnues qui ne se lèveront que sur GPU (ou avec l'accès HF)
+## 4. Inconnues
+
+### 4.1 État pour Alpamayo 2 Edge (2026-11-22)
+
+Tableau refait après D-015. Source : `docs/edge_review.md` (abrégé ER, avec le numéro de section). La séance qui traite ce qui reste est `docs/gpu_session_02.md`. Les numéros 1 à 12 sont ceux du tableau d'origine ; 13 à 18 sont propres à Edge.
+
+| # | Inconnue | État pour Edge | Ce qui la lève, ou ce qui reste |
+|---|---|---|---|
+| 1 | Format de la CoC à l'entraînement | **Tombe.** Texte libre après un bloc `<think></think>` vide, sans balise ; la séquence d'entraînement prolonge exactement le prompt d'inférence | ER §3 : code et rendu à froid du template. Ce que le modèle génère réellement reste à observer : bloc 1 |
+| 2, 3 | `config.json` des checkpoints | **Levée** pour Edge | `docs/configs/alpamayo2-edge/` (révision `f8951d0`). `tokenizer.json` n'y est pas : aucun comptage de jetons de texte à froid |
+| 4 | Méta-actions (`Longitudinal/Lateral/Lane`) | **Reste, GPU.** La consigne native ne les demande pas ; le décodeur sait les séparer si elles apparaissent | ER §2 ; bloc 1 les relève si elles sortent |
+| 5 | Forward avec gradients | **Tombe.** Fourni et testé par la recette, sous `transformers` 5.17.0 | ER §4 ; bloc 4 le fait tourner sur un GPU, sans DeepSpeed |
+| 6 | Mémoire et temps d'un pas d'entraînement | **Reste, GPU.** La recette ne donne aucun chiffre ; l'arithmétique donne 39,5 Gio d'états FP32 avant activations | ER §5 ; bloc 4 mesure pic mémoire et temps par pas. Décide D-004 |
+| 7 | Noms des modules pour LoRA | **Levée**, noms différents de 2 Super (`fc1`/`fc2` ; `q/k/v_proj` aussi dans la vision et l'expert) | ER §11. Sans objet tant que D-004 est suspendue |
+| 8 | Longueur de séquence | **Estimée.** 2 892 jetons visuels calculés, 3 236 jetons de prompt selon la fiche, plafond de 8 192 sans troncature | ER §5 ; blocs 1 et 4 mesurent la longueur réelle |
+| 9 | flash-attn sur le pod | **Tombe** pour le chemin par défaut : SDPA partout, flash-attn est un extra optionnel | ER §5 |
+| 10 | `traj_to_action` sur une trajectoire amortie jusqu'à l'arrêt | **Reste.** La classe d'espace d'action a changé (`UnicycleAccelCurvatureCourseActionSpace`) | Hors séance 02 : à traiter avec le point d'extension « trajectoire cible » de W3 |
+| 11 | Reproductibilité des rollouts à graine fixée | **Reste, GPU.** Le README prévient qu'un autre backend d'attention peut changer le texte tiré | bloc 1, option `--repro-check` |
+| 12 | Licence des poids dérivés | **Texte disponible** : poids sous OpenMDW-1.1 ; conditions du dataset PAI à part | ER §12. Lecture à faire par Ousseynou avant tout partage de checkpoint |
+| 13 | Edge partage-t-il le défaut de 2 Super (narration confiante sous blackout) ? | **Reste, GPU** | blocs 1 et 2 |
+| 14 | Poids de l'instruction de navigation : trajectoire et CoC la suivent-elles ? | **Reste, GPU.** Entrée obligatoire de la tâche native, absente de PAI public et de nos manifestes | bloc 3. Conditionne le premier point d'extension de W3 |
+| 15 | « Raisonnement adaptatif » : la CoC peut-elle être vide, et à quelle fréquence ? | **Reste, GPU.** Aucun réglage dans le code ; la longueur est décidée par le modèle | ER §10 ; bloc 1 relève la longueur de chaque CoC |
+| 16 | Reproduit-on le chemin d'évaluation de la recette sur le checkpoint de base ? | **Reste, GPU** | bloc 5 (`evaluate_hf.py`) |
+| 17 | Forme des entrées pour `afh` : 22 images à plat, un identifiant par image | **Reste, à froid.** Le harnais suppose un tenseur caméras × temps | D-010 (mise à jour) ; runner Edge à écrire dans `alpamayo-faithfulness` |
+| 18 | Écart entre les révisions `f8951d0` et `aaaa32c` du checkpoint | **Reste, à froid** (accès HF) | D-016 ; à regarder avant l'export Thor de W6 |
+
+### 4.2 État antérieur pour 2 Super et 1.5 (2026-10-11, conservé)
 
 Douze inconnues au départ. État au 2026-10-11, après les configs (`docs/configs/`, commit `804fd42`), D-008/D-010, et la recette officielle `alpamayo-recipes` #39 (`recipes/alpamayo2_sft/`, abrégé `R/`) avec `alpamayo2` #18. Détail et références dans `docs/recipe_a2_sft_review.md`. La colonne « Recette » dit ce que la recette lève ; la séance qui traite le reste est `docs/gpu_session_01.md`.
 
@@ -361,4 +389,4 @@ Décidé ici (dans le périmètre de D-004) : LoRA sur le LM du VLM d'abord, exp
 - **D-010 (adoptée)** : `afh` raisonne en identifiants caméra (`afh/cameras.py`, alpamayo-faithfulness PR #7) ; `runners/probe_blackout_a15.py` passe `camera_indices` au harnais.
 - **D-009 (proposée)** : FSDP bf16 vs base quantifiée pour l'étape 3 — attendre l'inconnue 6.
 - **D-014 (proposée)** : adopter la recette officielle `alpamayo2_sft` comme base W1. Critère : si le bloc 2 tient sur un H200 avec des gradients de taille PEFT, 2 Super sur le code de la recette et 1.5 en repli ; sinon D-003 tient. D-004 tient : PEFT sur `TrainableAlpamayo2Super` est un livrable W1, budget 4 à 8 H100 conditionné à PEFT.
-
+- **D-015 (actée, 2026-11-22)** : Edge devient la base de W1, 2 Super la référence. **D-016 (proposée)** : adopter `alpamayo2edge_sft` en config native. D-003 et D-014 sont caduques, D-004 est suspendue à la mesure mémoire, D-008 est sans objet pour Edge.

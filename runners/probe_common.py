@@ -281,8 +281,8 @@ class Attempt:
 
 
 def run_with_fallback(
-    configs: Sequence[InputConfig],
-    attempt_fn: Callable[[InputConfig, dict], None],
+    configs: Sequence[Any],
+    attempt_fn: Callable[[Any, dict], None],
     on_update: Optional[Callable[[list[dict]], None]] = None,
     cleanup: Optional[Callable[[], None]] = None,
     sweep: bool = False,
@@ -336,9 +336,13 @@ def run_with_fallback(
                     reduced_because.append(kind)
             if kind == "too_long":
                 seq = steps.get("sequence_before_padding") or {}
+                # frame_indices exists on InputConfig only; EdgeInputConfig describes its
+                # images in config_detail (frames_per_camera).
+                frame_indices = getattr(cfg, "frame_indices", None)
                 findings.append({"finding": "SequenceTooLong", "config": cfg.name,
                                  "camera_ids": list(cfg.camera_ids),
-                                 "frame_indices": list(cfg.frame_indices),
+                                 "frame_indices": None if frame_indices is None else list(frame_indices),
+                                 "config_detail": asdict(cfg),
                                  "real_len": seq.get("real_len"),
                                  "max_length": seq.get("max_length"),
                                  "truncated": False, "error": att.error})

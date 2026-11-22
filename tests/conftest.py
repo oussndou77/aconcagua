@@ -23,3 +23,20 @@ if ROOT not in sys.path:
 def afh_fixture_dir():
     path = os.path.join(AFH_CHECKOUT, "fixtures")
     return path if os.path.isdir(path) else None
+
+
+def _pinned_checkout(name, env):
+    path = os.environ.get(env, os.path.join(ROOT, ".deps", name))
+    return path if os.path.isdir(os.path.join(path, ".git")) else None
+
+
+@pytest.fixture(scope="session")
+def edge_src():
+    """Pinned source checkout of NVlabs/alpamayo2-edge (scripts/fetch_edge_sources.sh), or None."""
+    return _pinned_checkout("alpamayo2-edge", "EDGE_REPO")
+
+
+@pytest.fixture(scope="session")
+def recipes_src():
+    """Pinned source checkout of NVlabs/alpamayo-recipes (scripts/fetch_edge_sources.sh), or None."""
+    return _pinned_checkout("alpamayo-recipes", "RECIPES_REPO")
